@@ -1,5 +1,7 @@
 # 阿里云 MCP Server 使用指南
 
+## [README of English](README-EN.md)
+
 ## 📚 目录
 
 - [概述](#概述)

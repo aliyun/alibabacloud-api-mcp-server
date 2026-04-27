@@ -26,8 +26,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/CodeSpaceiiii/mcp-proxy"
-Repository = "https://github.com/CodeSpaceiiii/mcp-proxy"
+Homepage = "https://github.com/aliyun/alibabacloud-api-mcp-server"
+Repository = "https://github.com/aliyun/alibabacloud-api-mcp-server"
 
 [project.scripts]
 "alibabacloud.mcp-proxy" = "alibabacloud.mcp_proxy.cli:main"

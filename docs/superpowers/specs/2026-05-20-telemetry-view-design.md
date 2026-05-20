@@ -34,10 +34,18 @@ Each directory is scanned for `{client}/traces/*.jsonl`.
 
 ## Tech Stack
 
-- **Backend**: Python 3.13+, `aiohttp` (new required dependency)
+- **Backend**: Python 3.10+, `aiohttp` (new required dependency)
 - **Frontend**: Vanilla HTML/JS/CSS SPA (no build step, bundled as static assets)
 - **Real-time**: Server-Sent Events (SSE) for live span/session updates
 - **Distribution**: Works seamlessly with `uvx` — zero build step for users
+
+### Python 3.10 Compatibility Constraints
+
+- Use `from __future__ import annotations` in all modules (enables `X | Y` union syntax)
+- No `match` statements — use if/elif chains
+- No `type X = ...` aliases (3.12+) — use `TypeAlias` from `typing_extensions` if needed
+- No `asyncio.TaskGroup` (3.11+) — rely on aiohttp's built-in concurrency
+- No `except*` (3.11+) — use standard exception handling
 
 ## Package Structure
 
@@ -308,10 +316,14 @@ Startup flow:
 
 ## Dependencies
 
-Add to `pyproject.toml`:
+Update `pyproject.toml`:
 ```toml
+requires-python = ">=3.10"
+
 dependencies = [
     ...,
     "aiohttp>=3.9.0",
 ]
 ```
+
+Note: The `requires-python` is lowered from `>=3.13` to `>=3.10` for broader compatibility. Existing proxy code should be audited for 3.13-only features, but the telemetry-view module will strictly target 3.10+.

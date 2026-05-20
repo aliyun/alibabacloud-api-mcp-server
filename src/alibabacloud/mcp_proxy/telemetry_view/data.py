@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 
 @dataclass
@@ -204,3 +205,91 @@ def build_span_tree(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         sort_children(root)
     roots.sort(key=lambda r: r.get("start_timestamp", ""))
     return roots
+
+
+class TraceFileWatcher:
+    def __init__(
+        self,
+        index: dict[tuple[str, str], SessionMeta],
+        data_dirs: list[Path],
+        on_change: Callable[[str, dict[str, Any]], Awaitable[None]],
+        poll_interval: float = 2.0,
+    ) -> None:
+        self._index = index
+        self._data_dirs = data_dirs
+        self._on_change = on_change
+        self._poll_interval = poll_interval
+        self._known_files: set[Path] = {meta.file_path for meta in index.values()}
+
+    async def run(self) -> None:
+        while True:
+            await self._check_existing_files()
+            await self._check_new_files()
+            await asyncio.sleep(self._poll_interval)
+
+    async def _check_existing_files(self) -> None:
+        for key, meta in list(self._index.items()):
+            if not meta.file_path.exists():
+                continue
+            current_size = meta.file_path.stat().st_size
+            if current_size <= meta.file_offset:
+                continue
+            new_spans = parse_jsonl_file(meta.file_path, offset=meta.file_offset)
+            if not new_spans:
+                meta.file_offset = current_size
+                continue
+            self._update_meta(meta, new_spans, current_size)
+            await self._on_change("session_updated", {
+                "client": meta.client,
+                "session_id": meta.session_id,
+                "last_activity": meta.last_activity,
+                "span_count": meta.span_count,
+                "new_spans": new_spans,
+            })
+
+    async def _check_new_files(self) -> None:
+        for base_dir in self._data_dirs:
+            if not base_dir.exists():
+                continue
+            for client_dir in base_dir.iterdir():
+                if not client_dir.is_dir():
+                    continue
+                traces_dir = client_dir / "traces"
+                if not traces_dir.exists():
+                    continue
+                for jsonl_file in traces_dir.glob("*.jsonl"):
+                    if jsonl_file in self._known_files:
+                        continue
+                    self._known_files.add(jsonl_file)
+                    spans = parse_jsonl_file(jsonl_file)
+                    if not spans:
+                        continue
+                    client = client_dir.name
+                    session_id = _extract_session_id(spans, jsonl_file)
+                    meta = _build_meta(client, session_id, jsonl_file, spans)
+                    self._index[(client, session_id)] = meta
+                    await self._on_change("session_updated", {
+                        "client": meta.client,
+                        "session_id": meta.session_id,
+                        "last_activity": meta.last_activity,
+                        "span_count": meta.span_count,
+                        "new_spans": spans,
+                    })
+
+    def _update_meta(self, meta: SessionMeta, new_spans: list[dict[str, Any]], new_offset: int) -> None:
+        meta.file_offset = new_offset
+        meta.span_count += len(new_spans)
+
+        for span in new_spans:
+            ts = span.get("end_timestamp") or span.get("start_timestamp", "")
+            if ts and ts > meta.last_activity:
+                meta.last_activity = ts
+
+            turn = span.get("turn")
+            if turn is not None:
+                expected_turns = turn + 1
+                if expected_turns > meta.turn_count:
+                    meta.turn_count = expected_turns
+
+            if span.get("status") == "failure" or span.get("stop_reason") == "StopFailure":
+                meta.has_errors = True

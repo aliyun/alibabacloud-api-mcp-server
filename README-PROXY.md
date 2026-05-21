@@ -177,6 +177,43 @@ uvx alibabacloud.mcp-proxy@latest plugin-telemetry \
 
 `plugin-telemetry` 走"尽力而为（best-effort）"模型：内置最多 4 次尝试、每次连接/读取超时 3 秒，失败时仅在 stderr 输出 WARN/ERROR 日志，**不会**抛出异常或影响调用方主流程。退出码：`0` 成功 / `1` 重试用尽仍失败 / `2` 参数错误。
 
+## 遥测可视化（Telemetry View）
+
+`telemetry-view` 子命令会启动一个本地 Web 服务，用于浏览和分析插件遥测产生的 trace 数据。支持多客户端（Claude Code、VS Code、Copilot CLI、Codex、Qoderwork）的 session 浏览、span 层级树、Gantt 时间线、Graph 流程图以及实时更新。
+
+### 启动
+
+```bash
+uvx alibabacloud.mcp-proxy@latest telemetry-view
+```
+
+默认在 `http://localhost:18321` 启动并自动打开浏览器。
+
+### 选项
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--port` | `18321` | 本地服务端口 |
+| `--no-open` | - | 不自动打开浏览器 |
+
+### 数据来源
+
+自动扫描以下目录中的 JSONL trace 文件：
+
+1. `$ALIBABACLOUD_TELEMETRY_STATE_DIR`（如已设置）
+2. `~/.cache/alibabacloud-agent-toolkit/telemetry/`
+3. `/tmp/alibabacloud-agent-toolkit-telemetry-<uid>/`
+
+### 功能
+
+- **首页**：展示所有 session 列表，按客户端筛选、关键字搜索、时间范围过滤；顶部统计栏显示总 session 数、各客户端分布和成功率
+- **Trace 详情页**：
+  - 左侧可折叠的 span 树，右侧可切换 Timeline（Gantt 条形图）和 Graph（按 Turn 分组的流程图）视图
+  - Graph 支持鼠标滚轮缩放、拖拽平移、全屏查看，全屏下点击节点显示浮动详情弹窗
+  - 点击任意 span 显示完整详细信息（事件类型、工具名、耗时、状态、输入/输出等）
+- **实时更新**：通过 SSE 推送新 span，无需手动刷新
+- **暗色/亮色主题切换**
+
 ## 配置参考
 
 每个 CLI 参数都有对应的环境变量。CLI 参数优先级高于环境变量。

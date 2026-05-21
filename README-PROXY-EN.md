@@ -191,6 +191,43 @@ uvx alibabacloud.mcp-proxy@latest plugin-telemetry \
 
 `plugin-telemetry` is best-effort: 4 attempts max, 3-second connect/read timeout per attempt. Failures only print WARN/ERROR to stderr — they never raise exceptions or disrupt the calling process. Exit codes: `0` success / `1` reporting failed after all retries / `2` argument error.
 
+### Telemetry View
+
+The `telemetry-view` sub-command launches a local web server for browsing and analyzing plugin telemetry trace data. It supports multiple clients (Claude Code, VS Code, Copilot CLI, Codex, Qoderwork) with session browsing, span hierarchy tree, Gantt timeline, Graph flow view, and real-time updates.
+
+#### Launch
+
+```bash
+uvx alibabacloud.mcp-proxy@latest telemetry-view
+```
+
+By default it starts on `http://localhost:18321` and opens the browser automatically.
+
+#### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port` | `18321` | Local server port |
+| `--no-open` | - | Don't auto-open browser |
+
+#### Data Sources
+
+Automatically scans JSONL trace files from:
+
+1. `$ALIBABACLOUD_TELEMETRY_STATE_DIR` (if set)
+2. `~/.cache/alibabacloud-agent-toolkit/telemetry/`
+3. `/tmp/alibabacloud-agent-toolkit-telemetry-<uid>/`
+
+#### Features
+
+- **Home page**: Lists all sessions with client filter, keyword search, time range filter; top stats bar shows total sessions, per-client distribution, and success rate
+- **Trace detail page**:
+  - Left: collapsible span tree. Right: switchable Timeline (Gantt bars) and Graph (turn-grouped flow diagram) views
+  - Graph supports mouse wheel zoom, drag-to-pan, fullscreen mode; clicking nodes in fullscreen shows a floating detail tooltip
+  - Clicking any span shows full detail (event type, tool name, duration, status, input/output, etc.)
+- **Real-time updates**: New spans are pushed via SSE without manual refresh
+- **Dark/light theme toggle**
+
 ### Configuration Reference
 
 Every CLI flag has a corresponding environment variable. **CLI flags take precedence** over environment variables.

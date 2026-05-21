@@ -20,6 +20,7 @@
   - [Remote Mode Access](#remote-mode-access)
   - [Access with Local Static Credentials](#access-with-local-static-credentials)
 - [Best Practices](#best-practices)
+- [Telemetry View](#telemetry-view)
 - [Local MCP Servers](#local-mcp-servers)
 - [Reference Documentation](#reference-documentation)
 
@@ -123,6 +124,16 @@ For proxy installation, MCP client configuration, safety policies, and pre-check
 ## Best Practices
 
 - 📘 [OpenAPI MCP Server Core Best Practices](docs/best-practices-en.md): Learn how to combine `Skill` and `safety policy` with MCP Server Core to build an efficient, secure, and production-ready Agent integration solution.
+
+## Telemetry View
+
+MCP Proxy includes a built-in `telemetry-view` sub-command that launches a local web server to browse plugin telemetry trace data, featuring session lists, span hierarchy tree, Timeline / Graph dual views, fullscreen browsing, and real-time updates.
+
+```bash
+uvx alibabacloud.mcp-proxy@latest telemetry-view
+```
+
+For details, see [Proxy User Guide - Telemetry View](README-PROXY-EN.md#telemetry-view).
 
 ## Local MCP Servers
 

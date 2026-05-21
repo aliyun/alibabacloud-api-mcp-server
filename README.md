@@ -20,6 +20,7 @@
   - [远程模式接入](#远程模式接入)
   - [通过本地静态凭证接入](#通过本地静态凭证接入)
 - [最佳实践](#最佳实践)
+- [遥测可视化](#遥测可视化)
 - [本地 MCP Server](#本地-mcp-server)
 - [参考文档](#参考文档)
 
@@ -123,6 +124,16 @@
 ## 最佳实践
 
 - 📘 [OpenAPI MCP Server Core 最佳实践](docs/best-practices.md)：介绍如何结合 `Skill` 与 `safety policy`，基于 MCP Server Core 构建高效、安全、适合生产环境的 Agent 集成方案。
+
+## 遥测可视化
+
+MCP Proxy 内置 `telemetry-view` 子命令，可在本地启动 Web 服务浏览插件遥测 trace 数据，支持 session 列表、span 层级树、Timeline / Graph 双视图、全屏浏览和实时更新。
+
+```bash
+uvx alibabacloud.mcp-proxy@latest telemetry-view
+```
+
+详细说明见 [Proxy 使用文档 - 遥测可视化](README-PROXY.md#遥测可视化telemetry-view)。
 
 ## 本地 MCP Server
 

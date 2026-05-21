@@ -33,6 +33,13 @@ def resolve_data_dirs() -> list[Path]:
     return [d for d in dirs if d.exists()]
 
 
+def _safe_stat(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def parse_jsonl_file(file_path: Path, offset: int = 0) -> list[dict[str, Any]]:
     raw_events: list[dict[str, Any]] = []
     with open(file_path, "r", encoding="utf-8") as f:
@@ -213,13 +220,15 @@ class TraceFileWatcher:
         index: dict[tuple[str, str], SessionMeta],
         data_dirs: list[Path],
         on_change: Callable[[str, dict[str, Any]], Awaitable[None]],
-        poll_interval: float = 2.0,
+        poll_interval: float = 5.0,
     ) -> None:
         self._index = index
         self._data_dirs = data_dirs
         self._on_change = on_change
         self._poll_interval = poll_interval
         self._known_files: set[Path] = {meta.file_path for meta in index.values()}
+        # last-seen mtime per session to skip parse when nothing changed
+        self._last_mtime: dict[Path, int] = {}
 
     async def run(self) -> None:
         while True:
@@ -229,12 +238,19 @@ class TraceFileWatcher:
 
     async def _check_existing_files(self) -> None:
         for key, meta in list(self._index.items()):
-            if not meta.file_path.exists():
+            stat_result = await asyncio.to_thread(_safe_stat, meta.file_path)
+            if stat_result is None:
                 continue
-            current_size = meta.file_path.stat().st_size
+            current_size = stat_result.st_size
+            current_mtime_ns = stat_result.st_mtime_ns
+            if self._last_mtime.get(meta.file_path) == current_mtime_ns and current_size <= meta.file_offset:
+                continue
+            self._last_mtime[meta.file_path] = current_mtime_ns
             if current_size <= meta.file_offset:
                 continue
-            new_spans = parse_jsonl_file(meta.file_path, offset=meta.file_offset)
+            new_spans = await asyncio.to_thread(
+                parse_jsonl_file, meta.file_path, meta.file_offset
+            )
             if not new_spans:
                 meta.file_offset = current_size
                 continue
@@ -248,6 +264,26 @@ class TraceFileWatcher:
             })
 
     async def _check_new_files(self) -> None:
+        new_paths = await asyncio.to_thread(self._scan_new_paths)
+        for client, jsonl_file in new_paths:
+            self._known_files.add(jsonl_file)
+            spans = await asyncio.to_thread(parse_jsonl_file, jsonl_file)
+            if not spans:
+                continue
+            session_id = _extract_session_id(spans, jsonl_file)
+            meta = await asyncio.to_thread(_build_meta, client, session_id, jsonl_file, spans)
+            self._index[(client, session_id)] = meta
+            await self._on_change("session_updated", {
+                "client": meta.client,
+                "session_id": meta.session_id,
+                "last_activity": meta.last_activity,
+                "span_count": meta.span_count,
+                "new_spans": spans,
+            })
+
+    def _scan_new_paths(self) -> list[tuple[str, Path]]:
+        """Sync FS walk that returns (client_name, jsonl_path) for files we haven't seen."""
+        results: list[tuple[str, Path]] = []
         for base_dir in self._data_dirs:
             if not base_dir.exists():
                 continue
@@ -260,21 +296,8 @@ class TraceFileWatcher:
                 for jsonl_file in traces_dir.glob("*.jsonl"):
                     if jsonl_file in self._known_files:
                         continue
-                    self._known_files.add(jsonl_file)
-                    spans = parse_jsonl_file(jsonl_file)
-                    if not spans:
-                        continue
-                    client = client_dir.name
-                    session_id = _extract_session_id(spans, jsonl_file)
-                    meta = _build_meta(client, session_id, jsonl_file, spans)
-                    self._index[(client, session_id)] = meta
-                    await self._on_change("session_updated", {
-                        "client": meta.client,
-                        "session_id": meta.session_id,
-                        "last_activity": meta.last_activity,
-                        "span_count": meta.span_count,
-                        "new_spans": spans,
-                    })
+                    results.append((client_dir.name, jsonl_file))
+        return results
 
     def _update_meta(self, meta: SessionMeta, new_spans: list[dict[str, Any]], new_offset: int) -> None:
         meta.file_offset = new_offset

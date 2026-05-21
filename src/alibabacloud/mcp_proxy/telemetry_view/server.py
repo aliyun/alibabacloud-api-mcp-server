@@ -2,30 +2,57 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import webbrowser
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
+_LOGGER = logging.getLogger(__name__)
+
 from alibabacloud.mcp_proxy.telemetry_view.data import (
     SessionMeta,
     TraceFileWatcher,
+    _safe_stat,
     build_span_tree,
     parse_jsonl_file,
 )
 
 _STATIC_DIR = Path(__file__).parent / "static"
+_SSE_HEARTBEAT_SECONDS = 15.0
+
+
+@web.middleware
+async def _api_no_keepalive_no_cache(
+    request: web.Request,
+    handler: Any,
+) -> web.StreamResponse:
+    """
+    Force ``Connection: close`` + ``Cache-Control: no-store`` on dynamic JSON API responses.
+
+    Chrome aggressively reuses HTTP/1.1 keep-alive connections from its socket pool.
+    When aiohttp closes an idle connection while Chrome is mid-request on it, the
+    request hangs (write succeeds into the TCP buffer, no response ever arrives).
+    Forcing close on JSON responses sidesteps the race; SSE keeps keep-alive.
+    """
+    response = await handler(request)
+    if request.path.startswith("/api/") and request.path != "/api/events":
+        response.headers["Cache-Control"] = "no-store"
+        response.force_close()
+    return response
 
 
 def create_app(
     index: dict[tuple[str, str], SessionMeta],
     data_dirs: list[Path],
 ) -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_api_no_keepalive_no_cache])
     app["index"] = index
     app["data_dirs"] = data_dirs
     app["sse_clients"] = []
+    # detail-page cache keyed by (client, session_id) -> (mtime_ns, file_size, spans)
+    app["detail_cache"] = {}
 
     app.router.add_get("/api/sessions", handle_sessions)
     app.router.add_get("/api/sessions/{client}/{session_id}", handle_session_detail)
@@ -113,7 +140,21 @@ async def handle_session_detail(request: web.Request) -> web.Response:
         return web.json_response({"error": "Session not found"}, status=404)
 
     meta = index[key]
-    spans = parse_jsonl_file(meta.file_path)
+    cache = request.app["detail_cache"]
+    stat_result = await asyncio.to_thread(_safe_stat, meta.file_path)
+    if stat_result is None:
+        return web.json_response({"error": "Trace file is not readable"}, status=404)
+
+    cache_key = (client, session_id)
+    cached = cache.get(cache_key)
+    if (
+        cached is not None
+        and cached[0] == stat_result.st_mtime_ns
+        and cached[1] == stat_result.st_size
+    ):
+        return web.Response(body=cached[2], content_type="application/json")
+
+    spans = await asyncio.to_thread(parse_jsonl_file, meta.file_path)
     tree = build_span_tree(spans)
 
     turn_numbers: set[int] = set()
@@ -143,7 +184,7 @@ async def handle_session_detail(request: web.Request) -> web.Response:
 
     total_calls = success_count + failure_count
 
-    return web.json_response({
+    payload = {
         "client": client,
         "session_id": session_id,
         "start_time": meta.start_time,
@@ -158,7 +199,10 @@ async def handle_session_detail(request: web.Request) -> web.Response:
             "failure": failure_count,
             "success_rate": round(success_count / total_calls * 100, 1) if total_calls else 100.0,
         },
-    })
+    }
+    body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    cache[cache_key] = (stat_result.st_mtime_ns, stat_result.st_size, body)
+    return web.Response(body=body, content_type="application/json")
 
 
 async def handle_sse(request: web.Request) -> web.StreamResponse:
@@ -172,19 +216,46 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
             "X-Accel-Buffering": "no",
         },
     )
-    await response.prepare(request)
+    try:
+        await response.prepare(request)
+    except (ConnectionResetError, asyncio.CancelledError) as exc:
+        _LOGGER.debug("SSE prepare aborted (client disconnected): %s", exc)
+        return response
+    except Exception as exc:  # noqa: BLE001 — aiohttp's ClientConnectionResetError lives outside this scope
+        if exc.__class__.__name__ == "ClientConnectionResetError":
+            _LOGGER.debug("SSE prepare aborted (client disconnected): %s", exc)
+            return response
+        raise
 
     queue: asyncio.Queue[str] = asyncio.Queue()
     request.app["sse_clients"].append(queue)
 
+    async def _safe_write(payload: str) -> bool:
+        try:
+            await response.write(payload.encode("utf-8"))
+            return True
+        except (ConnectionResetError, asyncio.CancelledError):
+            return False
+        except Exception as exc:  # noqa: BLE001
+            if exc.__class__.__name__ == "ClientConnectionResetError":
+                return False
+            raise
+
     try:
         while True:
-            data = await queue.get()
-            await response.write(data.encode("utf-8"))
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=_SSE_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                if not await _safe_write(": ping\n\n"):
+                    break
+                continue
+            if not await _safe_write(data):
+                break
     except (asyncio.CancelledError, ConnectionResetError):
         pass
     finally:
-        request.app["sse_clients"].remove(queue)
+        if queue in request.app["sse_clients"]:
+            request.app["sse_clients"].remove(queue)
 
     return response
 

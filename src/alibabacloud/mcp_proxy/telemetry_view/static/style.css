@@ -77,6 +77,7 @@ body {
 :root .icon-moon { display: none; }
 [data-theme="dark"] .icon-moon { display: block; }
 
+
 /* === Main Content === */
 main { max-width: 1400px; margin: 0 auto; padding: 24px; }
 .loading { text-align: center; padding: 48px; color: var(--text-secondary); }

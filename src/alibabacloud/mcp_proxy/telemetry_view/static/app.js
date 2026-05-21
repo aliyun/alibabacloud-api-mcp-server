@@ -13,7 +13,23 @@ const CLIENT_LOGOS = {
 // === State ===
 let currentPage = 1;
 let currentFilters = { client: '', q: '', start_time: '', end_time: '' };
-let eventSource = null;
+let inflightController = null;
+const FETCH_TIMEOUT_MS = 10000;
+
+function cancelInflight() {
+    if (inflightController) {
+        try { inflightController.abort(); } catch (_) {}
+        inflightController = null;
+    }
+}
+
+function newController() {
+    cancelInflight();
+    inflightController = new AbortController();
+    const c = inflightController;
+    setTimeout(() => { try { c.abort(); } catch (_) {} }, FETCH_TIMEOUT_MS);
+    return c;
+}
 
 // === Theme ===
 function initTheme() {
@@ -46,7 +62,8 @@ function route() {
 
 // === Session List ===
 async function renderSessionList(container) {
-    container.innerHTML = '<div class="loading">Loading sessions...</div>';
+    const isEmpty = !container.firstElementChild || container.querySelector('.loading');
+    if (isEmpty) container.innerHTML = '<div class="loading">Loading sessions...</div>';
 
     const params = new URLSearchParams({
         page: currentPage,
@@ -54,13 +71,17 @@ async function renderSessionList(container) {
         ...Object.fromEntries(Object.entries(currentFilters).filter(([_, v]) => v))
     });
 
+    const ctrl = newController();
     try {
-        const resp = await fetch('/api/sessions?' + params);
+        const resp = await fetch('/api/sessions?' + params, { signal: ctrl.signal });
         const data = await resp.json();
         container.innerHTML = buildSessionListHTML(data);
         bindSessionListEvents(container);
     } catch (err) {
+        if (err.name === 'AbortError') return;
         container.innerHTML = '<div class="loading">Error loading sessions: ' + err.message + '</div>';
+    } finally {
+        if (inflightController === ctrl) inflightController = null;
     }
 }
 
@@ -206,10 +227,16 @@ function bindSessionListEvents(container) {
 
 // === Trace Detail ===
 async function renderTraceDetail(container, client, sessionId) {
-    container.innerHTML = '<div class="loading">Loading trace...</div>';
+    const sameSession = container.dataset.tracePath === client + '/' + sessionId;
+    if (!sameSession) container.innerHTML = '<div class="loading">Loading trace...</div>';
+    container.dataset.tracePath = client + '/' + sessionId;
 
+    const ctrl = newController();
     try {
-        const resp = await fetch(`/api/sessions/${encodeURIComponent(client)}/${encodeURIComponent(sessionId)}`);
+        const resp = await fetch(
+            `/api/sessions/${encodeURIComponent(client)}/${encodeURIComponent(sessionId)}`,
+            { signal: ctrl.signal }
+        );
         if (!resp.ok) {
             container.innerHTML = '<div class="loading">Session not found</div>';
             return;
@@ -218,7 +245,12 @@ async function renderTraceDetail(container, client, sessionId) {
         container.innerHTML = buildTraceDetailHTML(data);
         bindTraceDetailEvents(container, data);
     } catch (err) {
-        container.innerHTML = '<div class="loading">Error: ' + err.message + '</div>';
+        if (err.name === 'AbortError') return;
+        if (!sameSession) {
+            container.innerHTML = '<div class="loading">Error: ' + err.message + '</div>';
+        }
+    } finally {
+        if (inflightController === ctrl) inflightController = null;
     }
 }
 
@@ -764,36 +796,10 @@ function escapeHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// === SSE ===
-function connectSSE() {
-    if (eventSource) eventSource.close();
-    eventSource = new EventSource('/api/events');
-
-    eventSource.addEventListener('session_updated', (e) => {
-        const data = JSON.parse(e.data);
-        if (!window.location.hash || window.location.hash === '#/') {
-            renderSessionList(document.getElementById('app'));
-        }
-    });
-
-    eventSource.addEventListener('new_spans', (e) => {
-        const data = JSON.parse(e.data);
-        const hash = window.location.hash || '';
-        if (hash.includes(data.session_id)) {
-            renderTraceDetail(document.getElementById('app'), data.client, data.session_id);
-        }
-    });
-
-    eventSource.onerror = () => {
-        setTimeout(() => connectSSE(), 5000);
-    };
-}
-
 // === Init ===
 function init() {
     initTheme();
     route();
-    connectSSE();
     window.addEventListener('hashchange', route);
 }
 

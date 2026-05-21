@@ -796,55 +796,11 @@ function escapeHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// === Auto-refresh ===
-const REFRESH_INTERVAL_SEC = 30;
-let refreshSecondsLeft = REFRESH_INTERVAL_SEC;
-let refreshTickerId = null;
-
-function refreshNow() {
-    refreshSecondsLeft = REFRESH_INTERVAL_SEC;
-    updateCountdownUI();
-    const btn = document.getElementById('refresh-btn');
-    if (btn) {
-        btn.classList.remove('refreshing');
-        // re-trigger CSS transition
-        void btn.offsetWidth;
-        btn.classList.add('refreshing');
-    }
-    route();
-}
-
-function updateCountdownUI() {
-    const el = document.getElementById('refresh-countdown');
-    if (el) el.textContent = refreshSecondsLeft + 's';
-}
-
-function startRefreshTicker() {
-    if (refreshTickerId !== null) return;
-    refreshSecondsLeft = REFRESH_INTERVAL_SEC;
-    updateCountdownUI();
-    refreshTickerId = setInterval(() => {
-        refreshSecondsLeft -= 1;
-        if (refreshSecondsLeft <= 0) {
-            refreshSecondsLeft = REFRESH_INTERVAL_SEC;
-            route();
-        }
-        updateCountdownUI();
-    }, 1000);
-}
-
 // === Init ===
 function init() {
     initTheme();
     route();
-    startRefreshTicker();
-    window.addEventListener('hashchange', () => {
-        refreshSecondsLeft = REFRESH_INTERVAL_SEC;
-        updateCountdownUI();
-        route();
-    });
-    const refreshBtn = document.getElementById('refresh-btn');
-    if (refreshBtn) refreshBtn.addEventListener('click', refreshNow);
+    window.addEventListener('hashchange', route);
 }
 
 if (document.readyState === 'loading') {

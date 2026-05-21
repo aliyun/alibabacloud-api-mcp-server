@@ -5,3 +5,8 @@ __pycache__/
 dist/
 build/
 *.pyc
+
+# Superpowers (local-only)
+docs/superpowers/
+superpowers/
+.superpowers/

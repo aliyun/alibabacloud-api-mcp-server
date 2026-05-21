@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import logging
+import sys
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import anyio
 import httpx
 from anyio.abc import TaskGroup
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup  # type: ignore[no-redef]
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import AnyUrl

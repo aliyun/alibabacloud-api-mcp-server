@@ -259,6 +259,10 @@ function buildTraceDetailHTML(data) {
     const flatSpans = flattenTree(data.spans);
     const timeRange = getTimeRange(flatSpans);
     const st = data.stats || {};
+    const tokensInfo = data.tokens || { session_total: { grand_total: 0 }, turns: [] };
+    const sessionTotal = (tokensInfo.session_total && tokensInfo.session_total.grand_total) || 0;
+    // Token map for fast span-detail lookups: span_id → {kind, tokens, ...}
+    window.__tokenIndex = buildTokenIndex(tokensInfo);
 
     let html = `
         <div class="trace-header">
@@ -282,6 +286,10 @@ function buildTraceDetailHTML(data) {
             <span class="stat-item failure">${st.failure || 0} fail</span>
             <span class="stat-divider"></span>
             <span class="stat-item">Rate: <strong>${st.success_rate || 0}%</strong></span>
+            <span class="stat-divider"></span>
+            <span class="stat-item" title="Sum of LLM tokens across all traced turns (strict / Layer 1).">
+                <strong>${formatTokenCount(sessionTotal)}</strong> tokens
+            </span>
         </div>
         <div class="trace-layout">
             <div class="trace-tree" id="trace-tree">
@@ -315,6 +323,7 @@ function buildTraceDetailHTML(data) {
 
 function buildTreeHTML(spans, depth) {
     let html = '';
+    const tokenIdx = window.__tokenIndex || {};
     for (const span of spans) {
         const hasChildren = span.children && span.children.length > 0;
         const indent = depth * 20;
@@ -322,6 +331,17 @@ function buildTreeHTML(spans, depth) {
         const label = getSpanLabel(span);
         const duration = span.duration_ms != null ? formatDuration(span.duration_ms) : '';
         const statusClass = span.status === 'failure' ? 'failure' : (span.status === 'success' ? 'success' : '');
+        const tokEntry = tokenIdx[span.span_id];
+        let tokenChip = '';
+        // Suppress chip on turn_end — its tokens are already shown on the prompt of the same turn.
+        if (tokEntry && tokEntry.tokens && tokEntry.tokens.grand_total > 0 && span.event !== 'turn_end') {
+            const n = tokEntry.tokens.grand_total;
+            const isEstimate = tokEntry.kind === 'skill';
+            const tip = isEstimate
+                ? `Estimated tokens (${tokEntry.confidence_level || 'n/a'} confidence)`
+                : (tokEntry.kind === 'turn' ? `Turn total tokens` : `Tool LLM tokens`);
+            tokenChip = `<span class="span-duration" title="${escapeHtml(tip)}" style="color:var(--accent)">${isEstimate ? '~' : ''}${formatTokenCount(n)}</span>`;
+        }
 
         html += `
             <div class="span-item" data-span-id="${escapeHtml(span.span_id)}" style="padding-left:${12 + indent}px">
@@ -329,6 +349,7 @@ function buildTreeHTML(spans, depth) {
                 <span class="span-icon" style="color:${getSpanColor(span)}">${icon}</span>
                 <span class="span-label">${escapeHtml(label)}</span>
                 ${statusClass ? `<span class="span-status-badge ${statusClass}">${span.status}</span>` : ''}
+                ${tokenChip}
                 ${duration ? `<span class="span-duration">${duration}</span>` : ''}
             </div>
         `;
@@ -653,6 +674,11 @@ function showSpanDetail(container, span) {
         `;
     }
 
+    const tokenEntry = (window.__tokenIndex || {})[span.span_id];
+    if (tokenEntry) {
+        html += buildTokenDetailHTML(tokenEntry);
+    }
+
     if (span.tool_response != null) {
         const truncatedWarning = span.truncated ? '<div class="truncated-warning">Response truncated (>64KB)</div>' : '';
         const responseText = typeof span.tool_response === 'string'
@@ -794,6 +820,145 @@ function getSpanIcon(span) {
 function escapeHtml(str) {
     if (!str) return '';
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// === Token UI ===
+//
+// Layer 1 (strict): turn_tokens, session_total, tool_tokens — sourced directly
+// from turn_end events emitted by the producer.
+// Layer 2 (estimated): per-skill tokens with confidence band, attributed by
+// walking the parent chain of each tool span back to its nearest
+// skill_invocation. Confidence reflects how cleanly that attribution holds
+// when a turn contains multiple skills or unrelated bash calls.
+const _TOKEN_FIELDS = ['input_uncached', 'input_cached', 'input_creation', 'output', 'reasoning'];
+
+function _sumTokenDicts(dicts) {
+    const out = {};
+    for (const k of _TOKEN_FIELDS) out[k] = 0;
+    for (const d of dicts) {
+        if (!d) continue;
+        for (const k of _TOKEN_FIELDS) out[k] += (Number(d[k]) || 0);
+    }
+    out.grand_total = _TOKEN_FIELDS.reduce((a, k) => a + out[k], 0);
+    return out;
+}
+
+function buildTokenIndex(tokensInfo) {
+    const idx = {};
+    if (!tokensInfo || !tokensInfo.turns) return idx;
+    for (const t of tokensInfo.turns) {
+        for (const tool of t.tools || []) {
+            if (!tool.span_id) continue;
+            idx[tool.span_id] = {
+                kind: 'tool',
+                tokens: tool.tokens || {},
+                turn: t.turn,
+                confidence_level: t.confidence_level,
+                confidence_value: t.confidence_value,
+            };
+        }
+        for (const skill of t.skills || []) {
+            if (!skill.span_id) continue;
+            const entry = {
+                kind: 'skill',
+                tokens: skill.estimated_tokens || {},
+                turn: t.turn,
+                confidence_level: t.confidence_level,
+                confidence_value: t.confidence_value,
+                skill_count: t.skill_count,
+                non_skill_tool_count: t.non_skill_tool_count,
+            };
+            idx[skill.span_id] = entry;
+            if (skill.span_id.endsWith('.skill')) {
+                const bashId = skill.span_id.slice(0, -'.skill'.length);
+                idx[bashId] = entry;
+            }
+        }
+        const turnTotal = t.turn_tokens || {};
+        const turnGrand = Number(turnTotal.grand_total) || 0;
+        if (t.turn_end_span_id || (t.prompt_span_ids && t.prompt_span_ids.length && turnGrand > 0)) {
+            const attributed = _sumTokenDicts((t.tools || []).map(tl => tl.tokens || {}));
+            const unattributed = {};
+            for (const k of _TOKEN_FIELDS) {
+                unattributed[k] = Math.max(0, (Number(turnTotal[k]) || 0) - attributed[k]);
+            }
+            unattributed.grand_total = _TOKEN_FIELDS.reduce((a, k) => a + unattributed[k], 0);
+            const turnEntry = {
+                kind: 'turn',
+                tokens: turnTotal,
+                attributed_tokens: attributed,
+                unattributed_tokens: unattributed,
+                turn: t.turn,
+                tool_count: (t.tools || []).length,
+            };
+            if (t.turn_end_span_id) idx[t.turn_end_span_id] = turnEntry;
+            for (const pid of t.prompt_span_ids || []) {
+                if (pid && !idx[pid]) idx[pid] = turnEntry;
+            }
+        }
+    }
+    return idx;
+}
+
+function formatTokenCount(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+    return (n / 1_000_000).toFixed(2) + 'M';
+}
+
+function buildTokenDetailHTML(entry) {
+    const t = entry.tokens || {};
+    const isSkill = entry.kind === 'skill';
+    const isTurn = entry.kind === 'turn';
+    let title;
+    if (isTurn) title = `Tokens (turn ${entry.turn})`;
+    else if (isSkill) title = 'Tokens (estimated)';
+    else title = 'Tokens';
+    let confBadge = '';
+    if (isSkill && entry.confidence_level) {
+        const cls = 'confidence-' + entry.confidence_level;
+        const tipParts = [];
+        if (entry.skill_count != null) tipParts.push(entry.skill_count + ' skill(s) in turn');
+        if (entry.non_skill_tool_count != null) tipParts.push(entry.non_skill_tool_count + ' unrelated tool(s)');
+        const tip = tipParts.join(', ') || 'attribution confidence';
+        confBadge = `<span class="confidence-badge ${cls}" title="${escapeHtml(tip)}">${escapeHtml(entry.confidence_level)}</span>`;
+    }
+    const grand = t.grand_total != null ? t.grand_total : 0;
+    const row = (label, value) => `<tr><td style="color:var(--text-secondary);width:140px">${label}</td><td>${formatTokenCount(value || 0)}</td></tr>`;
+    let html = `
+        <div class="detail-section">
+            <div class="detail-section-title">${title} ${confBadge}</div>
+            <table style="font-size:13px;width:100%">
+                <tr><td style="color:var(--text-secondary);width:140px"><strong>Grand total</strong></td><td><strong>${formatTokenCount(grand)}</strong></td></tr>
+                ${row('Input (uncached)', t.input_uncached)}
+                ${row('Input (cached)', t.input_cached)}
+                ${row('Input (cache create)', t.input_creation)}
+                ${row('Output', t.output)}
+                ${row('Reasoning', t.reasoning)}
+            </table>
+        </div>
+    `;
+    if (isTurn) {
+        const att = entry.attributed_tokens || {};
+        const un = entry.unattributed_tokens || {};
+        const attGrand = att.grand_total != null ? att.grand_total : 0;
+        const unGrand = un.grand_total != null ? un.grand_total : 0;
+        const tip = `Attributed = sum of token usage tied to a tool_use_id. Un-attributed = model responses with no tool call (free-floating assistant turns).`;
+        html += `
+            <div class="detail-section">
+                <div class="detail-section-title" title="${escapeHtml(tip)}">Breakdown</div>
+                <table style="font-size:13px;width:100%">
+                    <tr><td style="color:var(--text-secondary);width:200px">Attributed to tools (${entry.tool_count || 0})</td><td>${formatTokenCount(attGrand)}</td></tr>
+                    <tr><td style="color:var(--text-secondary);width:200px">Un-attributed (model only)</td><td>${formatTokenCount(unGrand)}</td></tr>
+                </table>
+            </div>
+        `;
+    }
+    if (isSkill && grand === 0) {
+        html += `<div class="confidence-note">No tool tokens could be attributed to this skill (no LLM calls inside its span tree).</div>`;
+    }
+    return html;
 }
 
 // === Init ===

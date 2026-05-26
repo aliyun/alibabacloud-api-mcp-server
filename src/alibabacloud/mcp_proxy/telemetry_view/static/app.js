@@ -263,6 +263,10 @@ function buildTraceDetailHTML(data) {
     const sessionTotal = (tokensInfo.session_total && tokensInfo.session_total.grand_total) || 0;
     // Token map for fast span-detail lookups: span_id → {kind, tokens, ...}
     window.__tokenIndex = buildTokenIndex(tokensInfo);
+    // Agent client name, used by capability-aware token rendering to hide
+    // fields that don't apply to this provider (e.g. reasoning on Claude,
+    // input_creation on Codex).
+    window.__tokenClient = data.client || '';
 
     let html = `
         <div class="trace-header">
@@ -321,11 +325,12 @@ function buildTraceDetailHTML(data) {
     return html;
 }
 
-function buildTreeHTML(spans, depth) {
+function buildTreeHTML(spans, depth, opts) {
+    const flat = !!(opts && opts.flat);
     let html = '';
     const tokenIdx = window.__tokenIndex || {};
     for (const span of spans) {
-        const hasChildren = span.children && span.children.length > 0;
+        const hasChildren = !flat && span.children && span.children.length > 0;
         const indent = depth * 20;
         const icon = getSpanIcon(span);
         const label = getSpanLabel(span);
@@ -333,14 +338,22 @@ function buildTreeHTML(spans, depth) {
         const statusClass = span.status === 'failure' ? 'failure' : (span.status === 'success' ? 'success' : '');
         const tokEntry = tokenIdx[span.span_id];
         let tokenChip = '';
-        // Suppress chip on turn_end — its tokens are already shown on the prompt of the same turn.
-        if (tokEntry && tokEntry.tokens && tokEntry.tokens.grand_total > 0 && span.event !== 'turn_end') {
+        // Token chips: only on llm_call rows (per-call cost) and prompt rows
+        // (turn total). Tool/skill rows show no token count — tokens are an
+        // LLM-level fact, not a tool-level one.
+        if (tokEntry && tokEntry.tokens && tokEntry.tokens.grand_total > 0
+            && (tokEntry.kind === 'llm_call' || tokEntry.kind === 'turn')) {
             const n = tokEntry.tokens.grand_total;
-            const isEstimate = tokEntry.kind === 'skill';
-            const tip = isEstimate
-                ? `Estimated tokens (${tokEntry.confidence_level || 'n/a'} confidence)`
-                : (tokEntry.kind === 'turn' ? `Turn total tokens` : `Tool LLM tokens`);
-            tokenChip = `<span class="span-duration" title="${escapeHtml(tip)}" style="color:var(--accent)">${isEstimate ? '~' : ''}${formatTokenCount(n)}</span>`;
+            let tip;
+            if (tokEntry.kind === 'turn') {
+                tip = 'Turn total tokens';
+            } else {
+                const inline = formatNormalizedTokensInline(tokEntry.tokens);
+                tip = `LLM call${tokEntry.call_index != null ? ' #' + tokEntry.call_index : ''}`
+                    + (tokEntry.model ? ' (' + tokEntry.model + ')' : '')
+                    + (inline ? ' — ' + inline : '');
+            }
+            tokenChip = `<span class="span-duration" title="${escapeHtml(tip)}" style="color:var(--accent)">${formatTokenCount(n)}</span>`;
         }
 
         html += `
@@ -353,13 +366,30 @@ function buildTreeHTML(spans, depth) {
                 ${duration ? `<span class="span-duration">${duration}</span>` : ''}
             </div>
         `;
+        // Tree → flat handoff: when entering a prompt subtree we collect ALL
+        // descendants, sort by start_timestamp, and render them at one level.
+        // Children outside a turn (top-level siblings) keep the standard
+        // recursive tree shape.
         if (hasChildren) {
+            const flatten = span.event === 'prompt';
+            const kids = flatten ? _collectFlatDescendants(span.children) : span.children;
             html += `<div class="span-children" data-parent="${escapeHtml(span.span_id)}">`;
-            html += buildTreeHTML(span.children, depth + 1);
+            html += buildTreeHTML(kids, depth + 1, { flat: flatten });
             html += '</div>';
         }
     }
     return html;
+}
+
+function _collectFlatDescendants(nodes) {
+    const out = [];
+    function walk(n) {
+        out.push(n);
+        for (const c of n.children || []) walk(c);
+    }
+    for (const n of nodes) walk(n);
+    out.sort((a, b) => String(a.start_timestamp || '').localeCompare(String(b.start_timestamp || '')));
+    return out;
 }
 
 function buildTimelineHTML(flatSpans, timeRange) {
@@ -651,6 +681,7 @@ function showSpanDetail(container, span) {
                 ${span.request_id ? `<tr><td style="color:var(--text-secondary)">Request ID</td><td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(span.request_id)}</td></tr>` : ''}
                 ${span.tool_name ? `<tr><td style="color:var(--text-secondary)">Tool</td><td>${escapeHtml(span.tool_name)}</td></tr>` : ''}
                 ${span.skill_name ? `<tr><td style="color:var(--text-secondary)">Skill</td><td>${escapeHtml(span.skill_name)}</td></tr>` : ''}
+                ${span.skill_tag ? `<tr><td style="color:var(--text-secondary)">Skill tag</td><td><span style="background:var(--bg-skill,#fff7e6);color:var(--span-skill,#b96b00);padding:2px 8px;border-radius:4px;font-family:var(--font-mono);font-size:12px">⚡ ${escapeHtml(span.skill_tag)}</span></td></tr>` : ''}
                 ${span.stop_reason ? `<tr><td style="color:var(--text-secondary)">Stop Reason</td><td>${escapeHtml(span.stop_reason)}</td></tr>` : ''}
             </table>
         </div>
@@ -792,28 +823,129 @@ function formatDuration(ms) {
     return (ms / 60000).toFixed(1) + 'min';
 }
 
+function _skillRelPath(toolInput) {
+    // Returns the path SEGMENT after /skills/<skill>/, e.g. "SKILL.md",
+    // "references/foo.md", "scripts/bar.py". Empty if no skill path is found.
+    if (!toolInput || typeof toolInput !== 'object') return '';
+    const candidates = [toolInput.file_path, toolInput.filePath, toolInput.path,
+                        toolInput.command, toolInput.pattern];
+    for (const v of candidates) {
+        if (typeof v !== 'string' || !v) continue;
+        const m = v.replace(/\\/g, '/').match(/\/skills\/[^\/]+\/([^\s'"`]+)/);
+        if (m) return m[1];
+    }
+    return '';
+}
+
+function _toolVerb(toolName) {
+    switch (toolName) {
+        case 'Bash':  return 'run';
+        case 'Read':  return 'read';
+        case 'Edit':  return 'edit';
+        case 'Write': return 'write';
+        case 'Grep':  return 'search';
+        case 'Glob':  return 'search';
+        default: return (toolName || 'use').toLowerCase();
+    }
+}
+
+function _skillName(skillTag) {
+    // skill_tag is "<plugin>:<skill>" — show only the skill, plugin lives in tooltip.
+    if (!skillTag) return '';
+    const i = skillTag.indexOf(':');
+    return i >= 0 ? skillTag.slice(i + 1) : skillTag;
+}
+
+function _skillTargetLabel(toolName, toolInput) {
+    // Display the relative path (basename if it's at the skill root, else
+    // last path segment) for path-based skill detection. For UA-based skill
+    // detection (no skill path), surface the meaningful command head so users
+    // see what the skill actually did.
+    const rel = _skillRelPath(toolInput);
+    if (rel) {
+        const parts = rel.split('/');
+        return parts[parts.length - 1].slice(0, 40);
+    }
+    if (toolName === 'Bash') {
+        // UA-tagged aliyun call: strip env prefixes, show "aliyun <svc> <act>".
+        const cmd = String((toolInput && toolInput.command) || '');
+        const m = cmd.match(/\baliyun\s+([\w-]+)(?:\s+([\w-]+))?/);
+        if (m) {
+            return ('aliyun ' + m[1] + (m[2] ? ' ' + m[2] : '')).slice(0, 40);
+        }
+        return 'script';
+    }
+    return '';
+}
+
 function getSpanLabel(span) {
     if (span.event === 'prompt') return span.prompt ? span.prompt.slice(0, 60) : 'prompt';
-    if (span.event === 'tool') return span.tool_name || 'tool';
-    if (span.event === 'skill_invocation') return span.skill_name || 'skill';
     if (span.event === 'turn_end') return 'turn_end (' + (span.stop_reason || '') + ')';
+    if (span.event === 'llm_call') {
+        const ci = span.call_index != null ? ' #' + span.call_index : '';
+        const kids = (span.children || []).length;
+        const fan = kids > 1 ? ` — ${kids} parallel tool calls` : '';
+        return `LLM call${ci}${fan}`;
+    }
+    if (span.event === 'skill_invocation') {
+        // Skill ENTRY: ⚡ + full "<plugin>:<skill>" name. Same shape for
+        // Claude (native Skill tool) and Codex (bash-as-skill collapsed).
+        const sk = span.skill_tag
+            || (span.plugin_name && span.skill_name ? `${span.plugin_name}:${span.skill_name}` : '')
+            || (span.skill_name || '');
+        return sk ? `Skill: ${sk}` : 'Skill';
+    }
+    if (span.event === 'tool') {
+        // A tool call attributed to a skill (path or UA detection) keeps its
+        // NATIVE label — `skill_tag` is metadata only, not part of the trace
+        // label. Cloud API service/action wins next; finally the plain Bash /
+        // MCP shape.
+        const ca = span.cloud_api;
+        if (ca && (ca.service || ca.action)) {
+            const svc = ca.service || '?';
+            const act = ca.action || '?';
+            const region = ca.region ? ' (' + ca.region + ')' : '';
+            return `Cloud API: ${svc}.${act}${region}`;
+        }
+        if (span.tool_name === 'Bash') {
+            const cmd = String((span.tool_input && span.tool_input.command) || '')
+                .replace(/\s+/g, ' ').trim().slice(0, 60);
+            return cmd ? `Bash: ${cmd}` : 'Bash';
+        }
+        if (span.tool_name && span.tool_name.includes('___')) {
+            return `MCP: ${span.tool_name}`;
+        }
+        return span.tool_name || 'tool';
+    }
     return span.event || 'unknown';
 }
 
 function getSpanColor(span) {
     if (span.status === 'failure' || span.stop_reason === 'StopFailure') return 'var(--span-error)';
     if (span.event === 'prompt') return 'var(--span-prompt)';
-    if (span.event === 'tool') return 'var(--span-tool)';
+    if (span.event === 'tool') {
+        if (span.skill_tag) return 'var(--span-skill)';
+        return 'var(--span-tool)';
+    }
     if (span.event === 'skill_invocation') return 'var(--span-skill)';
     if (span.event === 'turn_end') return 'var(--span-turn-end)';
+    if (span.event === 'llm_call') return 'var(--accent)';
     return 'var(--text-secondary)';
 }
 
 function getSpanIcon(span) {
-    if (span.event === 'prompt') return '&#128172;';
-    if (span.event === 'tool') return '&#128295;';
-    if (span.event === 'skill_invocation') return '&#9889;';
-    if (span.event === 'turn_end') return '&#127937;';
+    if (span.event === 'prompt') return '&#128172;';            // speech bubble
+    if (span.event === 'turn_end') return '&#127937;';          // checkered flag
+    if (span.event === 'llm_call') return '&#129302;';          // robot
+    // ⚡ ONLY for skill entry events. A tool with skill_tag is just a tool
+    // happening inside a skill — keep its native icon, expose skill_tag as
+    // metadata (tooltip / panel) rather than visual replacement.
+    if (span.event === 'skill_invocation') return '&#9889;';    // lightning
+    if (span.event === 'tool') {
+        if (span.cloud_api && (span.cloud_api.service || span.cloud_api.action)) return '&#9729;'; // cloud
+        if (span.tool_name && span.tool_name.includes('___')) return '&#128268;'; // plug (MCP)
+        return '&#128295;';                                     // wrench
+    }
     return '&#9679;';
 }
 
@@ -824,13 +956,28 @@ function escapeHtml(str) {
 
 // === Token UI ===
 //
-// Layer 1 (strict): turn_tokens, session_total, tool_tokens — sourced directly
-// from turn_end events emitted by the producer.
+// Layer 1 (strict): turn_tokens, session_total, llm_calls — sourced directly
+// from turn_end events emitted by the producer. Each llm_calls entry is one
+// real LLM call, with tokens attributed to the call itself (not fanned out
+// across the sibling tool spans it emitted). Legacy tool_tokens fan-out is
+// only consumed for old traces lacking llm_calls.
 // Layer 2 (estimated): per-skill tokens with confidence band, attributed by
-// walking the parent chain of each tool span back to its nearest
-// skill_invocation. Confidence reflects how cleanly that attribution holds
-// when a turn contains multiple skills or unrelated bash calls.
+// walking the parent chain of each LLM call's first tool_span_id back to its
+// nearest skill_invocation. Confidence reflects how cleanly that attribution
+// holds when a turn contains multiple skills or unrelated bash calls.
 const _TOKEN_FIELDS = ['input_uncached', 'input_cached', 'input_creation', 'output', 'reasoning'];
+
+// Capability table: fields the agent client doesn't report at all. We hide
+// these in the UI rather than showing a misleading "0".
+const _CLIENT_INAPPLICABLE_FIELDS = {
+    'claude-code': new Set(['reasoning']),
+    'codex': new Set(['input_creation']),
+};
+function _isFieldApplicable(field) {
+    const client = window.__tokenClient || '';
+    const blocked = _CLIENT_INAPPLICABLE_FIELDS[client];
+    return !blocked || !blocked.has(field);
+}
 
 function _sumTokenDicts(dicts) {
     const out = {};
@@ -857,14 +1004,38 @@ function buildTokenIndex(tokensInfo) {
                 confidence_value: t.confidence_value,
             };
         }
+        // LLM calls: each entry represents one real LLM call. Use the
+        // backend-supplied span_id (real event id when emitted as a first-
+        // class llm_call event; synthetic fallback for legacy traces). The
+        // chip lands on whichever node the tree actually contains.
+        for (const call of t.llm_calls || []) {
+            const sid = call.span_id || `llm-call-t${t.turn}-c${call.call_index}`;
+            idx[sid] = {
+                kind: 'llm_call',
+                tokens: call.tokens || {},
+                turn: t.turn,
+                call_index: call.call_index,
+                model: call.model,
+                ts: call.ts,
+                tool_span_ids: call.tool_span_ids || [],
+                confidence_level: t.confidence_level,
+                confidence_value: t.confidence_value,
+            };
+        }
         for (const skill of t.skills || []) {
             if (!skill.span_id) continue;
+            // Per-skill confidence (preferred when present) — falls back to
+            // turn-level for legacy traces. The attribution_basis array
+            // explains how the estimate was derived call-by-call.
             const entry = {
                 kind: 'skill',
                 tokens: skill.estimated_tokens || {},
                 turn: t.turn,
-                confidence_level: t.confidence_level,
-                confidence_value: t.confidence_value,
+                confidence_level: skill.confidence_level || t.confidence_level,
+                confidence_value: skill.confidence_value != null
+                    ? skill.confidence_value : t.confidence_value,
+                attribution_basis: skill.attribution_basis || [],
+                skill_name: skill.skill_name,
                 skill_count: t.skill_count,
                 non_skill_tool_count: t.non_skill_tool_count,
             };
@@ -891,7 +1062,9 @@ function buildTokenIndex(tokensInfo) {
                 turn: t.turn,
                 tool_count: (t.tools || []).length,
             };
-            if (t.turn_end_span_id) idx[t.turn_end_span_id] = turnEntry;
+            // Turn-total chip lands on the prompt row only — turn_end is a
+            // closure marker, not a cost-bearing event. Tokens belong to LLM
+            // calls + turn aggregate (on the prompt).
             for (const pid of t.prompt_span_ids || []) {
                 if (pid && !idx[pid]) idx[pid] = turnEntry;
             }
@@ -907,35 +1080,64 @@ function formatTokenCount(n) {
     return (n / 1_000_000).toFixed(2) + 'M';
 }
 
+// Build a one-line "in: uncached 2.1k, cached 1.8k, create 100 / reasoning 0 / out 0.8k"
+// summary, skipping fields that don't apply to the current agent client. Used
+// for chip tooltips so the user sees the breakdown on hover without opening
+// the detail panel.
+function formatNormalizedTokensInline(tokens) {
+    if (!tokens) return '';
+    const parts = [];
+    const inputs = [];
+    if (_isFieldApplicable('input_uncached')) inputs.push('uncached ' + formatTokenCount(tokens.input_uncached || 0));
+    if (_isFieldApplicable('input_cached')) inputs.push('cached ' + formatTokenCount(tokens.input_cached || 0));
+    if (_isFieldApplicable('input_creation')) inputs.push('create ' + formatTokenCount(tokens.input_creation || 0));
+    if (inputs.length) parts.push('in: ' + inputs.join(', '));
+    if (_isFieldApplicable('reasoning')) parts.push('reasoning ' + formatTokenCount(tokens.reasoning || 0));
+    if (_isFieldApplicable('output')) parts.push('out ' + formatTokenCount(tokens.output || 0));
+    return parts.join(' / ');
+}
+
 function buildTokenDetailHTML(entry) {
     const t = entry.tokens || {};
     const isSkill = entry.kind === 'skill';
     const isTurn = entry.kind === 'turn';
+    const isLlmCall = entry.kind === 'llm_call';
     let title;
     if (isTurn) title = `Tokens (turn ${entry.turn})`;
     else if (isSkill) title = 'Tokens (estimated)';
+    else if (isLlmCall) {
+        title = `LLM call${entry.call_index != null ? ' #' + entry.call_index : ''}`
+            + (entry.model ? ` <span style="color:var(--text-secondary);font-weight:normal">(${escapeHtml(entry.model)})</span>` : '');
+    }
     else title = 'Tokens';
     let confBadge = '';
     if (isSkill && entry.confidence_level) {
         const cls = 'confidence-' + entry.confidence_level;
         const tipParts = [];
+        if (entry.confidence_value != null) tipParts.push('weight ' + entry.confidence_value);
         if (entry.skill_count != null) tipParts.push(entry.skill_count + ' skill(s) in turn');
         if (entry.non_skill_tool_count != null) tipParts.push(entry.non_skill_tool_count + ' unrelated tool(s)');
         const tip = tipParts.join(', ') || 'attribution confidence';
         confBadge = `<span class="confidence-badge ${cls}" title="${escapeHtml(tip)}">${escapeHtml(entry.confidence_level)}</span>`;
     }
     const grand = t.grand_total != null ? t.grand_total : 0;
-    const row = (label, value) => `<tr><td style="color:var(--text-secondary);width:140px">${label}</td><td>${formatTokenCount(value || 0)}</td></tr>`;
+    // Capability-aware row: hide fields that don't apply to this agent
+    // client (e.g. reasoning on claude-code, input_creation on codex).
+    const row = (label, field) => {
+        if (!_isFieldApplicable(field)) return '';
+        const value = t[field];
+        return `<tr><td style="color:var(--text-secondary);width:140px">${label}</td><td>${formatTokenCount(value || 0)}</td></tr>`;
+    };
     let html = `
         <div class="detail-section">
             <div class="detail-section-title">${title} ${confBadge}</div>
             <table style="font-size:13px;width:100%">
                 <tr><td style="color:var(--text-secondary);width:140px"><strong>Grand total</strong></td><td><strong>${formatTokenCount(grand)}</strong></td></tr>
-                ${row('Input (uncached)', t.input_uncached)}
-                ${row('Input (cached)', t.input_cached)}
-                ${row('Input (cache create)', t.input_creation)}
-                ${row('Output', t.output)}
-                ${row('Reasoning', t.reasoning)}
+                ${row('Input (uncached)', 'input_uncached')}
+                ${row('Input (cached)', 'input_cached')}
+                ${row('Input (cache create)', 'input_creation')}
+                ${row('Output', 'output')}
+                ${row('Reasoning', 'reasoning')}
             </table>
         </div>
     `;
@@ -957,6 +1159,24 @@ function buildTokenDetailHTML(entry) {
     }
     if (isSkill && grand === 0) {
         html += `<div class="confidence-note">No tool tokens could be attributed to this skill (no LLM calls inside its span tree).</div>`;
+    }
+    // Per-call attribution breakdown — shows exactly how the estimate was
+    // formed. Compresses long chains so the panel stays scannable.
+    if (isSkill && Array.isArray(entry.attribution_basis) && entry.attribution_basis.length > 0) {
+        const rows = entry.attribution_basis.map(r => `
+            <tr>
+                <td style="color:var(--text-secondary);width:80px">call #${r.call_index != null ? r.call_index : '?'}</td>
+                <td style="width:80px">w=${r.weight != null ? r.weight : 'n/a'}</td>
+                <td>${formatTokenCount(r.grand_total || 0)}</td>
+                <td style="color:var(--text-secondary);font-size:12px">${escapeHtml(r.reason || '')}</td>
+            </tr>
+        `).join('');
+        html += `
+            <div class="detail-section">
+                <div class="detail-section-title" title="Each row is one LLM call's contribution to this skill. weight=1.0 means sole owner; weight=1/N means shared with N-1 other skills.">Attribution breakdown</div>
+                <table style="font-size:13px;width:100%">${rows}</table>
+            </div>
+        `;
     }
     return html;
 }

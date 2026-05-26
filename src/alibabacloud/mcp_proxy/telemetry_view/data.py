@@ -85,6 +85,8 @@ def _merge_tool_spans(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "tool_input": start_ev.get("tool_input") if start_ev else None,
                 "tool_response": ev.get("tool_response"),
                 "truncated": ev.get("truncated", False),
+                "skill_tag": ev.get("skill_tag"),
+                "cloud_api": ev.get("cloud_api"),
             }
             merged.append(merged_span)
         else:
@@ -189,19 +191,30 @@ def _build_meta(
 # Token layers
 # ---------------------------------------------------------------------------
 #
-# The producer hook emits per-turn `turn_end` events carrying three Layer 1
+# The producer hook emits per-turn `turn_end` events carrying these Layer 1
 # (strict, high-confidence) fields:
 #
 #   * ``turn_tokens``            — sum of LLM token usage rows that belong to
 #                                  this turn.
 #   * ``aliyun_session_tokens``  — cumulative running total across traced
 #                                  turns (already accumulated by the producer).
-#   * ``tool_tokens``            — per-tool-span breakdown, keyed by span_id.
+#   * ``llm_calls``              — one entry per real LLM call: ``call_index``,
+#                                  ``model``, ``ts``, ``tool_use_ids``,
+#                                  ``tool_span_ids``, ``llm_tokens``. Tokens
+#                                  belong to the call, not to each emitted
+#                                  tool span — this prevents the fan-out
+#                                  overcount when one call emits N parallel
+#                                  bashes.
+#   * ``tool_tokens``            — LEGACY per-tool-span breakdown, keyed by
+#                                  span_id. Empty dict on new traces; only
+#                                  populated by old hooks. The viewer falls
+#                                  back to this path when ``llm_calls`` is
+#                                  absent.
 #
 # The viewer reconstructs Layer 2 (estimated skill attribution) itself by
-# walking each tool's parent chain to find the nearest ``skill_invocation``
-# ancestor. The confidence label reflects how confidently those tools can be
-# attributed to a single skill:
+# walking each LLM call's tool_span_ids up to their nearest
+# ``skill_invocation`` ancestor. The confidence label reflects how confidently
+# those calls can be attributed to a single skill:
 #
 #   * ``high``   — turn contains exactly one skill and (almost) no extra
 #                  noise; assume every tool ran inside that skill.
@@ -240,20 +253,32 @@ def _grand_total(tokens: dict[str, Any]) -> int:
 def _confidence_for_turn(skill_count: int, non_skill_tool_count: int) -> tuple[str, float]:
     """Return ``(label, numeric_value)`` for skill-attribution confidence.
 
-    The heuristic mirrors the user-facing description:
-      * one skill, little noise          → high (0.9)
-      * two-to-three skills, sequential   → medium (0.6)
-      * many skills, or mixed with bash   → low (0.3)
+    Legacy heuristic for the old tool_tokens fan-out path. The new path
+    (use_llm_calls=True) computes confidence per-skill from actual attribution
+    weights via _label_for_confidence and aggregates them up to the turn.
     """
     if skill_count == 0:
         return ("high", 1.0)
     if skill_count == 1:
-        # Single skill: even some surrounding bash is fine — anything in the
-        # turn is most likely related to that skill.
         return ("high", 0.9)
     if skill_count <= 3 and non_skill_tool_count == 0:
         return ("medium", 0.6)
     return ("low", 0.3)
+
+
+def _label_for_confidence(value: float) -> str:
+    """Single source of truth for confidence label thresholds.
+
+    A skill is "high" only when every attributed call gave it ≥0.85 weight
+    (i.e. it was sole or near-sole owner). Medium when avg weight ≥0.5
+    (typically 2 parallel/serial skills). Low otherwise (3+ ambiguous)."""
+    if value >= 0.85:
+        return "high"
+    if value >= 0.5:
+        return "medium"
+    if value > 0:
+        return "low"
+    return "none"
 
 
 def _walk_skill_ancestor(
@@ -320,6 +345,10 @@ def compute_token_layers(spans: list[dict[str, Any]]) -> dict[str, Any]:
     tools_in_turn: dict[int, list[dict[str, Any]]] = {}
     prompts_in_turn: dict[int, list[str]] = {}
     turn_end_by_turn: dict[int, dict[str, Any]] = {}
+    # Real first-class llm_call events keyed by (turn, call_index) → span_id.
+    # When present, the viewer uses these real ids for chip lookup so the
+    # chip lands on the real tree node instead of a synthetic placeholder.
+    real_llm_call_id: dict[tuple[int, Any], str] = {}
 
     for span in spans:
         sid = span.get("span_id")
@@ -340,6 +369,10 @@ def compute_token_layers(spans: list[dict[str, Any]]) -> dict[str, Any]:
         elif event == "turn_end":
             # Keep the last turn_end if the producer ever emits duplicates.
             turn_end_by_turn[turn] = span
+        elif event == "llm_call":
+            ci = span.get("call_index")
+            if ci is not None:
+                real_llm_call_id[(turn, ci)] = sid
 
     # Session total: prefer the most recent aliyun_session_tokens (it's
     # already cumulative); fall back to summing turn_tokens.
@@ -364,65 +397,245 @@ def compute_token_layers(spans: list[dict[str, Any]]) -> dict[str, Any]:
         te = turn_end_by_turn.get(turn) or {}
         turn_tokens_raw = te.get("turn_tokens") or {}
         tool_tokens_map = te.get("tool_tokens") or {}
+        llm_calls_raw = te.get("llm_calls") or []
+        use_llm_calls = bool(llm_calls_raw)
 
         skill_spans = skills_in_turn.get(turn, [])
         tool_spans = tools_in_turn.get(turn, [])
         skill_set = {s["span_id"] for s in skill_spans if s.get("span_id")}
 
-        # Per-skill attribution: walk each tool's parent chain to its
-        # nearest skill ancestor and accumulate the tool's tokens there.
-        # Skip Codex outer-bash tools that pair with a `.skill` companion —
-        # those bashes are folded into the skill display node, so counting
-        # their own llm_tokens in the skill estimate would double-count
-        # "the message that invoked the skill" and break the invariant
-        # `skill_est == Σ(visible children)` that Claude already satisfies.
+        # Per-skill attribution. Two paths:
+        #  * NEW (use_llm_calls): active-set algorithm. Walk LLM calls in
+        #    order, maintain the set of skills invoked-so-far in this turn.
+        #    For each call:
+        #      - if it invokes K≥1 skill(s): attribute its tokens to those
+        #        K skills with weight 1/K (the invocation itself).
+        #      - if it has no skill invocations but skills are active:
+        #        attribute to all K active skills with weight 1/K (execution
+        #        cost of those skills).
+        #      - if no skills active: prompt-level, count as non_skill.
+        #    Per-skill confidence = token-weighted average of contributing
+        #    call weights. high (≥0.85) means sole-owner most of the time;
+        #    low (<0.5) means consistently sharing with 2+ siblings.
+        #  * LEGACY: old trace files without llm_calls — walk-ancestor logic.
         skill_tokens: dict[str, dict[str, int]] = {sid: _empty_tokens() for sid in skill_set}
+        skill_attribution: dict[str, list[dict[str, Any]]] = {sid: [] for sid in skill_set}
         non_skill_tool_count = 0
         tools_out: list[dict[str, Any]] = []
-        for tool in tool_spans:
-            sid = tool.get("span_id")
-            # Codex outer-bash that pairs with a `.skill` companion is folded
-            # into the skill display node — drop it from tools_out so the
-            # frontend's attributed-token count matches the visible tree.
-            # Its llm_tokens (the "message that invoked the skill" cost) then
-            # surface in the prompt's Un-attributed breakdown.
-            if sid and (sid + ".skill") in skill_set:
-                continue
-            entry = tool_tokens_map.get(sid) if sid else None
-            tokens = dict((entry or {}).get("llm_tokens") or {})
-            normalised = {k: int(tokens.get(k) or 0) for k in _TOKEN_KEYS}
-            grand = sum(normalised.values())
-            tools_out.append({
-                "span_id": sid,
-                "tool_name": tool.get("tool_name") or "",
-                "tokens": {**normalised, "grand_total": grand},
-            })
-            if grand <= 0:
-                if sid:
-                    anc = _walk_skill_ancestor(sid, parent_of, skill_set)
-                    if not anc:
-                        non_skill_tool_count += 1
-                continue
-            anc = _walk_skill_ancestor(sid, parent_of, skill_set) if sid else ""
-            if anc:
-                skill_tokens[anc] = _add_tokens(skill_tokens[anc], normalised)
-            else:
-                non_skill_tool_count += 1
+        llm_calls_out: list[dict[str, Any]] = []
 
-        confidence_level, confidence_value = _confidence_for_turn(
-            len(skill_set), non_skill_tool_count
-        )
+        if use_llm_calls:
+            # Tools listed once each, with zero tokens — chips are now driven
+            # by llm_calls at the call level, not per-tool.
+            for tool in tool_spans:
+                sid = tool.get("span_id")
+                if sid and (sid + ".skill") in skill_set:
+                    continue
+                empty = _empty_tokens()
+                tools_out.append({
+                    "span_id": sid,
+                    "tool_name": tool.get("tool_name") or "",
+                    "tokens": {**empty, "grand_total": 0},
+                })
+
+            # Map every tool_use_id that corresponds to a skill invocation →
+            # the skill_span_id. Two sources: (1) skill.tool_use_id from the
+            # event itself (Codex bash-as-skill: the inner bash id),
+            # (2) the .skill suffix convention used by the Codex synthesizer.
+            # Claude does NOT surface Skill as a tool_use in its transcript
+            # (Skill is harness-side), so this map is empty for Claude.
+            tool_use_to_skill: dict[str, str] = {}
+            for sk in skill_spans:
+                sk_sid = sk.get("span_id") or ""
+                sk_tu = sk.get("tool_use_id") or sk_sid
+                if sk_tu:
+                    tool_use_to_skill[sk_tu] = sk_sid
+                if sk_sid and sk_sid not in tool_use_to_skill:
+                    tool_use_to_skill[sk_sid] = sk_sid
+
+            # Detect which skills have ANY binding evidence in this turn's
+            # transcript. Codex: typically all (skill bash_ids appear in
+            # call.tool_use_ids). Claude: typically none (Skill is harness-
+            # only) — but occasionally one bound skill leaks through.
+            # PARTIAL coverage is dangerous: if only 1 of N parallel skills
+            # has bindings, naively trusting the bind would steer ALL orphan
+            # tokens to that one skill (the a7d477f7 bug). We require
+            # FULL coverage before using the per-call active-set algorithm.
+            # Otherwise we treat every skill as equally active for orphan
+            # calls, while still attributing bound calls precisely.
+            sorted_skill_set = sorted(skill_set)
+            bound_skills: set[str] = set()
+            for c in llm_calls_raw:
+                for t in (
+                    list(c.get("tool_use_ids") or [])
+                    + list(c.get("tool_span_ids") or [])
+                ):
+                    sk = tool_use_to_skill.get(t)
+                    if sk in skill_set:
+                        bound_skills.add(sk)
+            full_binding_coverage = bool(skill_set) and bound_skills == skill_set
+
+            # Pre-seed with all skills unless we have full coverage (in which
+            # case we trust per-call discovery to add them in invocation order).
+            active_skills_order: list[str] = (
+                [] if full_binding_coverage else list(sorted_skill_set)
+            )
+
+            for call in llm_calls_raw:
+                tokens = dict(call.get("llm_tokens") or {})
+                normalised = {k: int(tokens.get(k) or 0) for k in _TOKEN_KEYS}
+                grand = sum(normalised.values())
+                call_tool_span_ids = list(call.get("tool_span_ids") or [])
+                call_tool_use_ids = list(call.get("tool_use_ids") or [])
+                ci = call.get("call_index")
+                # Prefer real first-class llm_call event id (new traces) so
+                # the chip lands on the real tree node; fall back to the
+                # synthetic id for legacy traces that only have side-table.
+                real_sid = real_llm_call_id.get((turn, ci))
+                llm_calls_out.append({
+                    "span_id": real_sid or llm_call_span_id(turn, ci),
+                    "call_index": ci,
+                    "model": call.get("model"),
+                    "ts": call.get("ts"),
+                    "tool_span_ids": call_tool_span_ids,
+                    "tokens": {**normalised, "grand_total": grand},
+                })
+
+                # Identify skill invocations in this call (dedup-preserving).
+                skills_in_call: list[str] = []
+                seen_in_call: set[str] = set()
+                for ident in (call_tool_use_ids + call_tool_span_ids):
+                    sk_sid = tool_use_to_skill.get(ident)
+                    if sk_sid and sk_sid not in seen_in_call:
+                        skills_in_call.append(sk_sid)
+                        seen_in_call.add(sk_sid)
+
+                # Update active set (newly-invoked skills join the context).
+                for sk in skills_in_call:
+                    if sk not in active_skills_order:
+                        active_skills_order.append(sk)
+
+                if grand <= 0:
+                    continue
+
+                # Three attribution branches.
+                if skills_in_call:
+                    n = len(skills_in_call)
+                    weight = 1.0 / n
+                    reason = "sole invocation" if n == 1 else f"1 of {n} parallel skill invocations"
+                    for sk in skills_in_call:
+                        skill_attribution[sk].append({
+                            "call_index": call.get("call_index"),
+                            "weight": weight,
+                            "tokens_grand": int(round(grand * weight)),
+                            "tokens": {k: normalised[k] * weight for k in _TOKEN_KEYS},
+                            "reason": reason,
+                        })
+                elif active_skills_order:
+                    k = len(active_skills_order)
+                    weight = 1.0 / k
+                    reason = "sole active skill" if k == 1 else f"1 of {k} active skills"
+                    for sk in active_skills_order:
+                        skill_attribution[sk].append({
+                            "call_index": call.get("call_index"),
+                            "weight": weight,
+                            "tokens_grand": int(round(grand * weight)),
+                            "tokens": {kk: normalised[kk] * weight for kk in _TOKEN_KEYS},
+                            "reason": reason,
+                        })
+                else:
+                    # No skills active in this turn yet — prompt-level work.
+                    non_skill_tool_count += 1
+
+            # Materialise per-skill totals (round shares to int last).
+            for sid in skill_set:
+                records = skill_attribution[sid]
+                if not records:
+                    continue
+                acc = {k: 0.0 for k in _TOKEN_KEYS}
+                for r in records:
+                    for k in _TOKEN_KEYS:
+                        acc[k] += r["tokens"][k]
+                skill_tokens[sid] = {k: int(round(acc[k])) for k in _TOKEN_KEYS}
+        else:
+            for tool in tool_spans:
+                sid = tool.get("span_id")
+                # Codex outer-bash that pairs with a `.skill` companion is folded
+                # into the skill display node — drop it from tools_out so the
+                # frontend's attributed-token count matches the visible tree.
+                # Its llm_tokens (the "message that invoked the skill" cost) then
+                # surface in the prompt's Un-attributed breakdown.
+                if sid and (sid + ".skill") in skill_set:
+                    continue
+                entry = tool_tokens_map.get(sid) if sid else None
+                tokens = dict((entry or {}).get("llm_tokens") or {})
+                normalised = {k: int(tokens.get(k) or 0) for k in _TOKEN_KEYS}
+                grand = sum(normalised.values())
+                tools_out.append({
+                    "span_id": sid,
+                    "tool_name": tool.get("tool_name") or "",
+                    "tokens": {**normalised, "grand_total": grand},
+                })
+                if grand <= 0:
+                    if sid:
+                        anc = _walk_skill_ancestor(sid, parent_of, skill_set)
+                        if not anc:
+                            non_skill_tool_count += 1
+                    continue
+                anc = _walk_skill_ancestor(sid, parent_of, skill_set) if sid else ""
+                if anc:
+                    skill_tokens[anc] = _add_tokens(skill_tokens[anc], normalised)
+                else:
+                    non_skill_tool_count += 1
 
         skills_out: list[dict[str, Any]] = []
         for skill in skill_spans:
             sid = skill.get("span_id")
             tokens = skill_tokens.get(sid, _empty_tokens())
             grand = sum(tokens.values())
+            records = skill_attribution.get(sid, [])
+            if use_llm_calls and records and grand > 0:
+                # Token-weighted average of call weights.
+                weighted_sum = sum(r["weight"] * r["tokens_grand"] for r in records)
+                total_grand = sum(r["tokens_grand"] for r in records)
+                sk_conf = weighted_sum / total_grand if total_grand > 0 else 0.0
+            elif use_llm_calls and records:
+                sk_conf = sum(r["weight"] for r in records) / len(records)
+            else:
+                sk_conf = 1.0 if not use_llm_calls and grand > 0 else 0.0
             skills_out.append({
                 "span_id": sid,
                 "skill_name": skill.get("skill_name") or "",
                 "estimated_tokens": {**tokens, "grand_total": grand},
+                "confidence_value": round(sk_conf, 3),
+                "confidence_level": _label_for_confidence(sk_conf),
+                "attribution_basis": [
+                    {
+                        "call_index": r["call_index"],
+                        "weight": round(r["weight"], 3),
+                        "grand_total": r["tokens_grand"],
+                        "reason": r["reason"],
+                    }
+                    for r in records
+                ],
             })
+
+        # Turn-level confidence: token-weighted average of skill confidences.
+        if use_llm_calls and skills_out:
+            total_attributed = sum(s["estimated_tokens"]["grand_total"] for s in skills_out)
+            if total_attributed > 0:
+                confidence_value = sum(
+                    s["confidence_value"] * s["estimated_tokens"]["grand_total"]
+                    for s in skills_out
+                ) / total_attributed
+            else:
+                confidence_value = sum(s["confidence_value"] for s in skills_out) / len(skills_out)
+            confidence_level = _label_for_confidence(confidence_value)
+        else:
+            confidence_level, confidence_value = _confidence_for_turn(
+                len(skill_set), non_skill_tool_count
+            )
+        confidence_value = round(confidence_value, 3)
 
         normalised_turn = {k: int(turn_tokens_raw.get(k) or 0) for k in _TOKEN_KEYS}
         turn_tokens_out = {
@@ -441,6 +654,7 @@ def compute_token_layers(spans: list[dict[str, Any]]) -> dict[str, Any]:
             "non_skill_tool_count": non_skill_tool_count,
             "skills": skills_out,
             "tools": tools_out,
+            "llm_calls": llm_calls_out,
         })
 
     return {"session_total": session_total, "turns": turns_out}
@@ -511,7 +725,45 @@ def _collapse_codex_bash_skill_pairs(roots: list[dict[str, Any]]) -> None:
     roots[:] = pseudo_root["children"]
 
 
+def _reanchor_real_llm_call_starts(spans: list[dict[str, Any]]) -> None:
+    """Codex emits the token_count event AFTER LLM streaming finishes, so the
+    first-class llm_call event's start_timestamp can land AFTER the tool
+    calls it produced. That breaks chronological views (flat timeline, tree
+    sibling order under prompt) — the LLM call appears below its bash. For
+    each real llm_call event with non-empty tool_span_ids, re-anchor its
+    start/end to ``min(child.start_timestamp) - 1ms`` so it sorts strictly
+    before its tools. Mutates the dicts in place; only adjusts when the
+    current ts is not already earliest, so Claude (already-correct ordering)
+    is untouched."""
+    span_start: dict[str, str] = {}
+    for s in spans:
+        # parse_jsonl_file merges tool_start+tool_end into event="tool";
+        # check both shapes to be safe with mixed inputs.
+        if s.get("event") in ("tool", "tool_start"):
+            sid = s.get("span_id")
+            ts = s.get("start_timestamp")
+            if sid and ts:
+                # First write wins (tool_start arrives before tool_end).
+                span_start.setdefault(sid, ts)
+    for s in spans:
+        if s.get("event") != "llm_call":
+            continue
+        tu_ids = s.get("tool_span_ids") or []
+        candidates = [span_start[t] for t in tu_ids if t in span_start]
+        if not candidates:
+            continue
+        earliest = min(_normalize_ts(c) for c in candidates)
+        cur = _normalize_ts(s.get("start_timestamp") or "")
+        if cur and cur < earliest:
+            continue  # already strictly before — Claude path, nothing to do
+        new_ts = _iso_minus_ms(earliest, 1)
+        if new_ts:
+            s["start_timestamp"] = new_ts
+            s["end_timestamp"] = new_ts
+
+
 def build_span_tree(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    _reanchor_real_llm_call_starts(spans)
     by_id: dict[str, dict[str, Any]] = {}
     roots: list[dict[str, Any]] = []
 
@@ -538,7 +790,200 @@ def build_span_tree(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
         sort_children(root)
     roots.sort(key=lambda r: r.get("start_timestamp", ""))
     _collapse_codex_bash_skill_pairs(roots)
+    _insert_llm_call_nodes(roots, spans)
     return roots
+
+
+def llm_call_span_id(turn: Any, call_index: Any) -> str:
+    """Stable id for the synthetic LLM-call node. Shared between data.py
+    (tree insertion) and the frontend (token index lookup)."""
+    return f"llm-call-t{turn}-c{call_index}"
+
+
+def _normalize_ts(ts: Any) -> str:
+    """Pad ISO timestamps without fractional seconds (...:56Z) so they sort
+    consistently with timestamps that include milliseconds (...:56.720Z).
+    Without this, 'Z' (0x5A) sorts after '.' (0x2E) and turn-end always
+    appears before sub-second-precision LLM call ts in the same second."""
+    if not ts:
+        return ""
+    if isinstance(ts, str) and ts.endswith("Z") and "." not in ts:
+        return ts[:-1] + ".000Z"
+    return str(ts)
+
+
+def _interpolate_iso_ts(start: Any, end: Any, step: int, total: int) -> str:
+    """Return start + (step/total) * (end - start) as ISO-Z. Used as a
+    fallback to redistribute orphan synthetic LLM calls evenly across a
+    turn's wall-clock duration when the producer wrote identical ts on
+    every call (legacy traces). Best-effort: returns "" on any parse error
+    so the caller can fall back to the original ts."""
+    from datetime import datetime, timezone
+    if not start or not end or total <= 0:
+        return ""
+    try:
+        s = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+        e = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    delta = (e - s).total_seconds()
+    if delta <= 0:
+        return ""
+    out = s + (e - s) * (step / total)
+    return out.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{out.microsecond // 1000:03d}Z"
+
+
+def _iso_minus_ms(ts: Any, ms: int) -> str:
+    """Subtract `ms` milliseconds from an ISO-Z timestamp. Returns "" on
+    any parse failure so callers can fall back to the original ts."""
+    from datetime import datetime, timedelta, timezone
+    if not ts or ms <= 0:
+        return ""
+    try:
+        s = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return ""
+    out = s - timedelta(milliseconds=ms)
+    return out.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+        f"{out.microsecond // 1000:03d}Z"
+
+
+def _insert_llm_call_nodes(
+    roots: list[dict[str, Any]],
+    spans: list[dict[str, Any]],
+) -> None:
+    """Wrap each prompt's tool/skill children in synthetic 'llm_call' nodes
+    so the tree visually groups tools that came from the same LLM API call.
+
+    For every ``turn_end`` event with an ``llm_calls`` list, look up the
+    prompt span (parent_span_id of the turn_end), and for each call create a
+    leaf node attached to that prompt. Existing children whose ``span_id``
+    appears in ``call.tool_span_ids`` are moved under the synthetic node.
+    Orphan calls (no ``tool_span_ids`` — pure reasoning / final text)
+    appear as childless leaves so their tokens stay visible.
+    """
+    by_id: dict[str, dict[str, Any]] = {}
+
+    def index(node: dict[str, Any]) -> None:
+        sid = node.get("span_id")
+        if sid:
+            by_id[sid] = node
+        for c in node.get("children") or []:
+            index(c)
+    for r in roots:
+        index(r)
+
+    # Turns that already have real first-class llm_call events get no
+    # synthesis — the producer's events are already in the tree as siblings
+    # of their tool calls under the prompt, ordered by start_timestamp.
+    turns_with_real_calls: set[Any] = {
+        s.get("turn") for s in spans if s.get("event") == "llm_call"
+    }
+
+    for te in spans:
+        if te.get("event") != "turn_end":
+            continue
+        if te.get("turn") in turns_with_real_calls:
+            continue
+        calls = te.get("llm_calls") or []
+        if not calls:
+            continue
+        prompt_id = te.get("parent_span_id")
+        prompt_node = by_id.get(prompt_id) if prompt_id else None
+        if prompt_node is None:
+            continue
+
+        existing = list(prompt_node.get("children") or [])
+        child_by_sid = {
+            c.get("span_id"): c for c in existing if c.get("span_id")
+        }
+        moved: set[str] = set()
+        synth_nodes: list[dict[str, Any]] = []
+
+        # Pre-fix Claude traces wrote `_now_iso()` at stop-time for every
+        # llm_call row, so all calls share one ts (e.g. turn-end's). Detect
+        # and interpolate orphan ts across [prompt, turn_end] by call_index
+        # so the visual order is at least monotonic instead of clustered.
+        # Normalize ts before comparing — call.ts has second precision while
+        # turn_end's start_timestamp has ms precision; raw string equality
+        # would never match.
+        call_ts_set = {_normalize_ts(c.get("ts") or "")[:19] for c in calls}
+        te_ts_trim = _normalize_ts(te.get("start_timestamp") or "")[:19]
+        broken_ts = (
+            len(call_ts_set) == 1
+            and len(calls) > 1
+            and next(iter(call_ts_set)) == te_ts_trim
+        )
+        prompt_start_ts = prompt_node.get("start_timestamp") or ""
+        turn_end_ts = te.get("start_timestamp") or ""
+
+        def _interp_ts(call_index: Any, total: int) -> str:
+            ci = call_index if isinstance(call_index, int) else 1
+            ts = _interpolate_iso_ts(prompt_start_ts, turn_end_ts, ci, total + 1)
+            return ts or turn_end_ts
+
+        total_calls = len(calls)
+        for call in calls:
+            tspan_ids = list(call.get("tool_span_ids") or [])
+            taken: list[dict[str, Any]] = []
+            for sid in tspan_ids:
+                ch = child_by_sid.get(sid)
+                if ch is not None and sid not in moved:
+                    taken.append(ch)
+                    moved.add(sid)
+            tokens = call.get("llm_tokens") or {}
+            if taken:
+                # Codex emits token_count AFTER LLM streaming finishes, which
+                # means call.ts > children's start_timestamp — naive use of
+                # taken[0].start_timestamp would also tie-break wrong (taken
+                # is in tool_span_ids iteration order, not chronological).
+                # Re-anchor to min(child) - 1ms so the synth LLM call sorts
+                # strictly before every child in flat-mode timeline.
+                child_starts = [
+                    _normalize_ts(t.get("start_timestamp"))
+                    for t in taken if t.get("start_timestamp")
+                ]
+                child_ends = [
+                    _normalize_ts(t.get("end_timestamp"))
+                    for t in taken if t.get("end_timestamp")
+                ]
+                earliest = min(child_starts) if child_starts else ""
+                shifted = _iso_minus_ms(earliest, 1) if earliest else ""
+                start_ts = shifted or earliest or taken[0].get("start_timestamp")
+                end_ts = max(child_ends) if child_ends else taken[-1].get("end_timestamp")
+            elif broken_ts:
+                start_ts = _interp_ts(call.get("call_index"), total_calls)
+                end_ts = start_ts
+            else:
+                start_ts = call.get("ts") or te.get("start_timestamp")
+                end_ts = call.get("ts") or te.get("end_timestamp")
+            synth = {
+                "span_id": llm_call_span_id(te.get("turn"), call.get("call_index")),
+                "parent_span_id": prompt_id,
+                "event": "llm_call",
+                "call_index": call.get("call_index"),
+                "model": call.get("model"),
+                "ts": call.get("ts"),
+                "tool_span_ids": tspan_ids,
+                "llm_tokens": tokens,
+                "turn": te.get("turn"),
+                "start_timestamp": start_ts,
+                "end_timestamp": end_ts,
+                "children": taken,
+            }
+            synth_nodes.append(synth)
+
+        leftover = [c for c in existing if c.get("span_id") not in moved]
+        combined = leftover + synth_nodes
+        # Secondary key: call_index lets identically-stamped synth calls keep
+        # producer order; non-llm spans get a large constant so they sort
+        # purely by timestamp.
+        combined.sort(key=lambda c: (
+            _normalize_ts(c.get("start_timestamp")),
+            c.get("call_index") if c.get("event") == "llm_call" else 10**9,
+        ))
+        prompt_node["children"] = combined
 
 
 class TraceFileWatcher:

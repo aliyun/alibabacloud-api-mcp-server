@@ -710,6 +710,10 @@ def _collapse_codex_bash_skill_pairs(roots: list[dict[str, Any]]) -> None:
                 node["skill_name"] = skill.get("skill_name", "")
                 node["plugin_name"] = skill.get("plugin_name", "")
                 node["_collapsed_from_bash"] = True
+                # Drop the bash's duration_ms after promotion: skill rows
+                # should not display a Duration chip (parity with claude /
+                # qoderwork native Skill rows, which have no duration_ms).
+                node["duration_ms"] = None
                 to_remove.add(id(skill))
         for child in node.get("children") or []:
             promote(child)

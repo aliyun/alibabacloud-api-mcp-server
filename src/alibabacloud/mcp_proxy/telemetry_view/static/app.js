@@ -356,11 +356,23 @@ function buildTreeHTML(spans, depth, opts) {
             tokenChip = `<span class="span-duration" title="${escapeHtml(tip)}" style="color:var(--accent)">${formatTokenCount(n)}</span>`;
         }
 
+        // Skill-tag chip on tool rows: surfaces 100%-confident skill
+        // attribution (UA env or SKILL.md path) without changing the row's
+        // native icon/label. Suppressed on skill_invocation rows since their
+        // label already names the skill.
+        let skillTagChip = '';
+        if (span.event === 'tool' && span.skill_tag) {
+            const shortName = span.skill_tag.includes(':')
+                ? span.skill_tag.split(':').pop()
+                : span.skill_tag;
+            skillTagChip = `<span class="span-skill-tag" title="Attributed to skill ${escapeHtml(span.skill_tag)}" style="background:var(--bg-skill,#fff7e6);color:var(--span-skill,#b96b00);padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">&#9889; ${escapeHtml(shortName)}</span>`;
+        }
         html += `
             <div class="span-item" data-span-id="${escapeHtml(span.span_id)}" style="padding-left:${12 + indent}px">
                 <span class="expand-btn">${hasChildren ? '&#9660;' : '&nbsp;'}</span>
                 <span class="span-icon" style="color:${getSpanColor(span)}">${icon}</span>
                 <span class="span-label">${escapeHtml(label)}</span>
+                ${skillTagChip}
                 ${statusClass ? `<span class="span-status-badge ${statusClass}">${span.status}</span>` : ''}
                 ${tokenChip}
                 ${duration ? `<span class="span-duration">${duration}</span>` : ''}

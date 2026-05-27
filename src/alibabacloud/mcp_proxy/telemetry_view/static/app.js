@@ -902,9 +902,17 @@ function getSpanLabel(span) {
     if (span.event === 'skill_invocation') {
         // Skill ENTRY: ⚡ + full "<plugin>:<skill>" name. Same shape for
         // Claude (native Skill tool) and Codex (bash-as-skill collapsed).
-        const sk = span.skill_tag
-            || (span.plugin_name && span.skill_name ? `${span.plugin_name}:${span.skill_name}` : '')
-            || (span.skill_name || '');
+        // Older traces stored skill_name with the plugin prefix already
+        // baked in; guard against double-prefix when re-rendering them.
+        const pn = span.plugin_name || '';
+        const sn = span.skill_name || '';
+        let joined = '';
+        if (pn && sn) {
+            joined = sn.startsWith(pn + ':') ? sn : `${pn}:${sn}`;
+        } else {
+            joined = sn;
+        }
+        const sk = span.skill_tag || joined;
         return sk ? `Skill: ${sk}` : 'Skill';
     }
     if (span.event === 'tool') {

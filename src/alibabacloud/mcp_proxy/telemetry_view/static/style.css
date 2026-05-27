@@ -329,6 +329,24 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px; }
 .stats-bar .stat-divider {
     width: 1px; height: 14px; background: var(--border);
 }
+/* === Confidence Badges (Layer 2 skill-attribution) === */
+.confidence-badge {
+    display: inline-block; padding: 1px 8px; border-radius: 10px;
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.5px; margin-left: 6px; vertical-align: middle;
+    border: 1px solid transparent;
+}
+.confidence-badge.confidence-high   { background: #e8f5e9; color: #2e7d32; border-color: #c8e6c9; }
+.confidence-badge.confidence-medium { background: #fff8e1; color: #f57c00; border-color: #ffe0b2; }
+.confidence-badge.confidence-low    { background: #ffebee; color: #c62828; border-color: #ffcdd2; }
+[data-theme="dark"] .confidence-badge.confidence-high   { background: #1b3a1d; color: #81c784; border-color: #2e5530; }
+[data-theme="dark"] .confidence-badge.confidence-medium { background: #3d2e0a; color: #ffb74d; border-color: #5a4413; }
+[data-theme="dark"] .confidence-badge.confidence-low    { background: #3d1818; color: #ef9a9a; border-color: #5a2222; }
+.confidence-note {
+    font-size: 11px; color: var(--text-tertiary);
+    margin-top: -8px; margin-bottom: 12px; font-style: italic;
+}
+
 .stats-bar .stat-tag {
     display: inline-block; padding: 2px 8px;
     background: var(--bg-tertiary); border-radius: 10px;

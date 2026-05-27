@@ -16,6 +16,7 @@ from alibabacloud.mcp_proxy.telemetry_view.data import (
     TraceFileWatcher,
     _safe_stat,
     build_span_tree,
+    compute_token_layers,
     parse_jsonl_file,
 )
 
@@ -156,6 +157,7 @@ async def handle_session_detail(request: web.Request) -> web.Response:
 
     spans = await asyncio.to_thread(parse_jsonl_file, meta.file_path)
     tree = build_span_tree(spans)
+    tokens = compute_token_layers(spans)
 
     turn_numbers: set[int] = set()
     tool_count = 0
@@ -199,6 +201,7 @@ async def handle_session_detail(request: web.Request) -> web.Response:
             "failure": failure_count,
             "success_rate": round(success_count / total_calls * 100, 1) if total_calls else 100.0,
         },
+        "tokens": tokens,
     }
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     cache[cache_key] = (stat_result.st_mtime_ns, stat_result.st_size, body)

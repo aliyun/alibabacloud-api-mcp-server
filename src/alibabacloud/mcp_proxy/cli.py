@@ -45,6 +45,12 @@ _PLUGIN_TELEMETRY_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("plugin_name", "pluginName", False),
     ("span_id", "spanId", False),
     ("parent_span_id", "parentSpanId", False),
+    ("skill_tag", "skillTag", False),
+    ("input_uncached_tokens", "inputUncachedTokens", False),
+    ("input_cached_tokens", "inputCachedTokens", False),
+    ("input_creation_tokens", "inputCreationTokens", False),
+    ("output_tokens", "outputTokens", False),
+    ("reasoning_tokens", "reasoningTokens", False),
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -271,6 +277,18 @@ def _add_plugin_telemetry_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plugin-name", dest="plugin_name", help="Plugin name, e.g. 'alibabacloud'.")
     parser.add_argument("--span-id", dest="span_id", help="Trace span identifier.")
     parser.add_argument("--parent-span-id", dest="parent_span_id", help="Parent trace span identifier.")
+    parser.add_argument("--skill-tag", dest="skill_tag",
+                        help="Skill tag inferred from the tool input path.")
+    parser.add_argument("--input-uncached-tokens", dest="input_uncached_tokens", type=int,
+                        help="LLM input tokens not served from cache (int32).")
+    parser.add_argument("--input-cached-tokens", dest="input_cached_tokens", type=int,
+                        help="LLM input tokens served from cache (int32).")
+    parser.add_argument("--input-creation-tokens", dest="input_creation_tokens", type=int,
+                        help="LLM input tokens consumed creating cache entries (int32).")
+    parser.add_argument("--output-tokens", dest="output_tokens", type=int,
+                        help="LLM output tokens (int32).")
+    parser.add_argument("--reasoning-tokens", dest="reasoning_tokens", type=int,
+                        help="LLM reasoning output tokens (int32).")
     # ── operational flags ─────────────────────────────────────────────────
     parser.add_argument("--verbose", action="store_true",
                         help="Log INFO+ to stderr (default: WARNING+).")
@@ -460,6 +478,24 @@ def _run_plugin_telemetry_command(args: argparse.Namespace) -> int:
     _configure_oneshot_logging(args)
     payload = _build_telemetry_payload(args)
 
+    # TEMP DEBUG: dump both raw argparse values and final payload so we can
+    # localize ms loss to bash→argv, argv→payload, or post-send.
+    try:
+        import json as _json
+        with open("/tmp/aliyun-debug-payload.log", "a") as _f:
+            _f.write(_json.dumps({
+                "stage": "mcp-proxy.payload",
+                "session": payload.get("sessionId"),
+                "event": payload.get("eventType"),
+                "tool": payload.get("toolName"),
+                "argv_start": getattr(args, "start_timestamp", None),
+                "argv_end": getattr(args, "end_timestamp", None),
+                "payload_start": payload.get("startTimestamp"),
+                "payload_end": payload.get("endTimestamp"),
+            }) + "\n")
+    except Exception:
+        pass
+
     try:
         response = report_telemetry(payload)
     except Exception as exc:  # noqa: BLE001 - hard safety net; should never trigger
@@ -474,6 +510,12 @@ def _run_plugin_telemetry_command(args: argparse.Namespace) -> int:
     if isinstance(body, dict) and body.get("success") is False:
         print(f"Telemetry rejected by backend: {body}", file=sys.stderr)
         return 1
+    # TEMP DEBUG: dump success response so the hook log captures requestId
+    if getattr(args, "verbose", False):
+        rid = (body or {}).get("requestId") if isinstance(body, dict) else None
+        sid = payload.get("sessionId")
+        ev = payload.get("eventType")
+        print(f"UPLOAD_OK sessionId={sid} event={ev} requestId={rid}", file=sys.stderr)
     return 0
 
 

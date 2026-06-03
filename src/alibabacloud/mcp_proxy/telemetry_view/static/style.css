@@ -352,3 +352,62 @@ main { max-width: 1400px; margin: 0 auto; padding: 24px; }
     background: var(--bg-tertiary); border-radius: 10px;
     font-size: 12px; color: var(--text-secondary);
 }
+
+/* === Summary Panel === */
+.summary-toggle-btn {
+    margin-left: auto;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border: 1px solid var(--border);
+    border-radius: 6px; background: var(--bg-primary);
+    color: var(--accent); font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: background 0.15s, border-color 0.15s;
+}
+.summary-toggle-btn:hover { background: var(--accent-light); border-color: var(--accent); }
+.summary-toggle-btn .toggle-arrow { font-size: 10px; transition: transform 0.2s; }
+.summary-toggle-btn.expanded .toggle-arrow { transform: rotate(180deg); }
+
+.session-summary {
+    margin-bottom: 12px; padding: 16px 20px;
+    background: var(--bg-secondary); border: 1px solid var(--border);
+    border-radius: var(--radius); font-size: 13px;
+}
+.session-summary .summary-section { margin-bottom: 14px; }
+.session-summary .summary-section:last-child { margin-bottom: 0; }
+.session-summary .summary-section-title {
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+    margin-bottom: 6px;
+}
+.session-summary .summary-item {
+    display: flex; align-items: center; gap: 6px;
+    padding: 2px 0; color: var(--text-secondary);
+}
+.session-summary .summary-item strong { color: var(--text-primary); }
+.session-summary .summary-list {
+    margin: 4px 0 4px 16px; padding: 0; list-style: none;
+}
+.session-summary .summary-list li {
+    padding: 2px 0; font-family: var(--font-mono); font-size: 12px;
+    color: var(--text-secondary);
+}
+.session-summary .skill-expand-btn {
+    background: none; border: none; cursor: pointer;
+    color: var(--accent); font-size: 12px; padding: 0 4px;
+}
+.session-summary .summary-link {
+    cursor: pointer; transition: color 0.15s;
+}
+.session-summary .summary-link:hover {
+    color: var(--accent); text-decoration: underline;
+}
+
+/* === Risk Badges === */
+.risk-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 8px;
+    font-size: 10px; font-weight: 600; margin-left: 4px;
+}
+.risk-badge-high { background: #ffebee; color: #c62828; }
+.risk-badge-medium { background: #fff8e1; color: #f57c00; }
+.risk-badge-low { background: #e8f5e9; color: #2e7d32; }
+[data-theme="dark"] .risk-badge-high { background: #3d1818; color: #ef9a9a; }
+[data-theme="dark"] .risk-badge-medium { background: #3d2e0a; color: #ffb74d; }
+[data-theme="dark"] .risk-badge-low { background: #1b3a1d; color: #81c784; }

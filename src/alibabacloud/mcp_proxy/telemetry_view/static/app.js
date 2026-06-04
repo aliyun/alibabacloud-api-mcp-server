@@ -79,7 +79,7 @@ async function renderSessionList(container) {
         bindSessionListEvents(container);
     } catch (err) {
         if (err.name === 'AbortError') return;
-        container.innerHTML = '<div class="loading">Error loading sessions: ' + err.message + '</div>';
+        container.innerHTML = '<div class="loading">Error loading sessions: ' + escapeHtml(err.message) + '</div>';
     } finally {
         if (inflightController === ctrl) inflightController = null;
     }
@@ -247,11 +247,154 @@ async function renderTraceDetail(container, client, sessionId) {
     } catch (err) {
         if (err.name === 'AbortError') return;
         if (!sameSession) {
-            container.innerHTML = '<div class="loading">Error: ' + err.message + '</div>';
+            container.innerHTML = '<div class="loading">Error: ' + escapeHtml(err.message) + '</div>';
         }
     } finally {
         if (inflightController === ctrl) inflightController = null;
     }
+}
+
+// === Risk Classification ===
+function classifyRisk(span) {
+    if (span.event !== 'tool') return null;
+    // help commands are always low risk regardless of the action verb
+    if (span.tool_input && span.tool_input.command && /\bhelp\b/i.test(span.tool_input.command)) return 'low';
+    // Only extract the ACTION verb, not the full parameter values
+    let actionName = '';
+    if (span.cloud_api && span.cloud_api.action) {
+        actionName = span.cloud_api.action.toLowerCase();
+    } else if (span.tool_input && span.tool_input.command) {
+        const cmd = span.tool_input.command.trim();
+        // IaC service: classify by specific subcommand
+        const iacM = cmd.match(/\baliyun\s+iacservice\s+([\w-]+)/);
+        if (iacM) {
+            const iacAction = iacM[1].toLowerCase();
+            if (/apply|execute-terraform-apply/i.test(iacAction)) return 'high';
+            if (/execute-terraform-plan|plan/i.test(iacAction)) return 'medium';
+            return 'low';
+        }
+        const m = cmd.match(/\baliyun\s+[\w-]+\s+([\w-]+)/);
+        if (m) actionName = m[1].toLowerCase();
+        else actionName = cmd.split(/\s+/).slice(0, 3).join(' ').toLowerCase();
+    } else if (span.tool_name) {
+        actionName = span.tool_name.toLowerCase();
+    }
+    if (/\b(update|modify|put|post|add|delete|remove|run|start|stop|reboot|create)/i.test(actionName)) return 'high';
+    if (/\b(allocate|attach|assign)/i.test(actionName)) return 'medium';
+    if (/\b(search|list|get|describe|read|find|call|version|configure|help|query)/i.test(actionName)) return 'low';
+    // Any alibabacloud MCP or aliyun bash call defaults to low if no keyword matched
+    const isAli = (span.tool_name && span.tool_name.includes('alibabacloud'))
+        || (span.tool_input && span.tool_input.command && /\baliyun\b/.test(span.tool_input.command))
+        || (span.cloud_api && (span.cloud_api.service || span.cloud_api.action));
+    if (isAli) return 'low';
+    return null;
+}
+
+function getRiskBadgeClass(level) {
+    if (level === 'high') return 'risk-badge risk-badge-high';
+    if (level === 'medium') return 'risk-badge risk-badge-medium';
+    if (level === 'low') return 'risk-badge risk-badge-low';
+    return '';
+}
+
+function getToolDisplayName(span) {
+    if (span.cloud_api && (span.cloud_api.service || span.cloud_api.action)) {
+        return `aliyun ${span.cloud_api.service || '?'} ${span.cloud_api.action || '?'}`;
+    }
+    if (span.tool_name === 'Bash' && span.tool_input && span.tool_input.command) {
+        const cmd = span.tool_input.command.replace(/\s*2>&1\s*/g, '').trim();
+        const m = cmd.match(/\baliyun\s+[\w-]+(?:\s+[\w-]+)?/);
+        if (m) return m[0];
+        return cmd.slice(0, 60);
+    }
+    if (span.tool_name && span.tool_name.includes('___')) {
+        const parts = span.tool_name.split('___');
+        return parts.length >= 2 ? `mcp ${parts[parts.length - 1]}` : span.tool_name;
+    }
+    return span.tool_name || 'unknown';
+}
+
+function buildSessionSummaryHTML(data) {
+    const flatSpans = flattenTree(data.spans);
+    const st = data.stats || {};
+
+    // Duration
+    const startTs = data.start_time ? new Date(data.start_time).getTime() : 0;
+    const endTs = data.last_activity ? new Date(data.last_activity).getTime() : 0;
+    const durationMs = endTs - startTs;
+    const durationStr = durationMs > 0 ? formatDuration(durationMs) : '-';
+
+    // Alibaba Cloud CLI/API calls
+    let aliCalls = 0, aliSuccess = 0, aliFail = 0;
+    const highRiskOps = [], medRiskOps = [], lowRiskOps = [];
+
+    for (const span of flatSpans) {
+        if (span.event !== 'tool') continue;
+        const isAliTool = (span.tool_name && span.tool_name.includes('alibabacloud'))
+            || (span.tool_input && span.tool_input.command && /\baliyun\b/.test(span.tool_input.command))
+            || (span.cloud_api && (span.cloud_api.service || span.cloud_api.action));
+        if (isAliTool) {
+            aliCalls++;
+            if (span.status === 'success') aliSuccess++;
+            else if (span.status === 'failure') aliFail++;
+        }
+
+        const risk = classifyRisk(span);
+        if (!risk) continue;
+        const displayName = getToolDisplayName(span);
+        const entry = { name: displayName, spanId: span.span_id };
+        if (risk === 'high') highRiskOps.push(entry);
+        else if (risk === 'medium') medRiskOps.push(entry);
+        else if (risk === 'low') lowRiskOps.push(entry);
+    }
+
+    // Skills list
+    const skillEntries = [];
+    for (const span of flatSpans) {
+        if (span.event === 'skill_invocation') {
+            const name = span.skill_name || span.skill_tag || 'unknown';
+            skillEntries.push({ name, spanId: span.span_id });
+        }
+    }
+
+    const skillListItems = skillEntries.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const highListItems = highRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const medListItems = medRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const lowListItems = lowRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+
+    return `
+        <div class="summary-section">
+            <div class="summary-section-title">Summary</div>
+            <div class="summary-item">总共 <strong>${st.turns || 0}</strong> 轮对话、耗时 <strong>${durationStr}</strong></div>
+        </div>
+        <div class="summary-section">
+            <div class="summary-section-title">使用摘要</div>
+            <div class="summary-item">阿里云 CLI/API 调用 <strong>${aliSuccess}/${aliCalls}</strong> 成功${aliFail > 0 ? `，<span style="color:var(--span-error)">${aliFail} 失败</span>` : ''}</div>
+            <div class="summary-item">使用了 <strong>${skillEntries.length}</strong> 个 SKILL：
+                ${skillEntries.length > 0 ? `<button class="skill-expand-btn" data-target="skill-list-detail">&#9660;</button>` : ''}
+            </div>
+            ${skillEntries.length > 0 ? `<ul class="summary-list" id="skill-list-detail" style="display:none">${skillListItems}</ul>` : ''}
+            <div class="summary-item">进行了 <strong>1</strong> 轮 HITL 审批链接</div>
+        </div>
+        <div class="summary-section">
+            <div class="summary-section-title">风险摘要</div>
+            <div class="summary-item" title="update / put / post / add 相关">
+                <span class="risk-badge risk-badge-high">高危</span> 操作 <strong>${highRiskOps.length}</strong> 次
+                ${highRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-high-list">&#9660;</button>` : ''}
+            </div>
+            ${highRiskOps.length > 0 ? `<ul class="summary-list" id="risk-high-list" style="display:none">${highListItems}</ul>` : ''}
+            <div class="summary-item" title="create 相关">
+                <span class="risk-badge risk-badge-medium">中危</span> 操作 <strong>${medRiskOps.length}</strong> 次
+                ${medRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-med-list">&#9660;</button>` : ''}
+            </div>
+            ${medRiskOps.length > 0 ? `<ul class="summary-list" id="risk-med-list" style="display:none">${medListItems}</ul>` : ''}
+            <div class="summary-item" title="search / list / get / describe 相关">
+                <span class="risk-badge risk-badge-low">低危</span> 操作 <strong>${lowRiskOps.length}</strong> 次
+                ${lowRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-low-list">&#9660;</button>` : ''}
+            </div>
+            ${lowRiskOps.length > 0 ? `<ul class="summary-list" id="risk-low-list" style="display:none">${lowListItems}</ul>` : ''}
+        </div>
+    `;
 }
 
 function buildTraceDetailHTML(data) {
@@ -259,6 +402,13 @@ function buildTraceDetailHTML(data) {
     const flatSpans = flattenTree(data.spans);
     const timeRange = getTimeRange(flatSpans);
     const st = data.stats || {};
+    const tokensInfo = data.tokens || { session_total: { grand_total: 0 }, turns: [] };
+    // Token map for fast span-detail lookups: span_id → {kind, tokens, ...}
+    window.__tokenIndex = buildTokenIndex(tokensInfo);
+    // Agent client name, used by capability-aware token rendering to hide
+    // fields that don't apply to this provider (e.g. reasoning on Claude,
+    // input_creation on Codex).
+    window.__tokenClient = data.client || '';
 
     let html = `
         <div class="trace-header">
@@ -270,6 +420,8 @@ function buildTraceDetailHTML(data) {
             </span>
         </div>
         <div class="stats-bar">
+            <span class="stat-item" style="font-weight:600;color:var(--accent)">Summary</span>
+            <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.turns || 0}</strong> turns</span>
             <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.tools || 0}</strong> tools</span>
@@ -278,10 +430,16 @@ function buildTraceDetailHTML(data) {
             <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.prompts || 0}</strong> prompts</span>
             <span class="stat-divider"></span>
-            <span class="stat-item success">${st.success || 0} ok</span>
+            <span class="stat-item success">${st.success || 0} success</span>
             <span class="stat-item failure">${st.failure || 0} fail</span>
             <span class="stat-divider"></span>
             <span class="stat-item">Rate: <strong>${st.success_rate || 0}%</strong></span>
+            <button class="summary-toggle-btn" id="summary-toggle-btn">
+                <span class="toggle-arrow">&#9660;</span>
+            </button>
+        </div>
+        <div class="session-summary" id="session-summary" style="display:none">
+            ${buildSessionSummaryHTML(data)}
         </div>
         <div class="trace-layout">
             <div class="trace-tree" id="trace-tree">
@@ -313,32 +471,94 @@ function buildTraceDetailHTML(data) {
     return html;
 }
 
-function buildTreeHTML(spans, depth) {
+function buildTreeHTML(spans, depth, opts) {
+    const flat = !!(opts && opts.flat);
     let html = '';
+    const tokenIdx = window.__tokenIndex || {};
     for (const span of spans) {
-        const hasChildren = span.children && span.children.length > 0;
+        const hasChildren = !flat && span.children && span.children.length > 0;
         const indent = depth * 20;
         const icon = getSpanIcon(span);
         const label = getSpanLabel(span);
         const duration = span.duration_ms != null ? formatDuration(span.duration_ms) : '';
         const statusClass = span.status === 'failure' ? 'failure' : (span.status === 'success' ? 'success' : '');
+        const tokEntry = tokenIdx[span.span_id];
+        let tokenChip = '';
+        // Token chips: only on llm_call rows (per-call cost) and prompt rows
+        // (turn total). Tool/skill rows show no token count — tokens are an
+        // LLM-level fact, not a tool-level one.
+        if (tokEntry && tokEntry.tokens && tokEntry.tokens.grand_total > 0
+            && (tokEntry.kind === 'llm_call' || tokEntry.kind === 'turn')) {
+            const n = tokEntry.tokens.grand_total;
+            let tip;
+            if (tokEntry.kind === 'turn') {
+                tip = 'Turn total tokens';
+            } else {
+                const inline = formatNormalizedTokensInline(tokEntry.tokens);
+                tip = `LLM call${tokEntry.call_index != null ? ' #' + tokEntry.call_index : ''}`
+                    + (tokEntry.model ? ' (' + tokEntry.model + ')' : '')
+                    + (inline ? ' — ' + inline : '');
+            }
+            tokenChip = `<span class="span-duration" title="${escapeHtml(tip)}" style="color:var(--accent)">${formatTokenCount(n)}</span>`;
+        }
 
+        // Skill-tag chip on tool rows: surfaces 100%-confident skill
+        // attribution (UA env or SKILL.md path) without changing the row's
+        // native icon/label. Suppressed on skill_invocation rows since their
+        // label already names the skill.
+        let skillTagChip = '';
+        if (span.event === 'tool' && span.skill_tag) {
+            const shortName = span.skill_tag.includes(':')
+                ? span.skill_tag.split(':').pop()
+                : span.skill_tag;
+            skillTagChip = `<span class="span-skill-tag" title="Attributed to skill ${escapeHtml(span.skill_tag)}" style="background:var(--bg-skill,#fff7e6);color:var(--span-skill,#b96b00);padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">&#9889; ${escapeHtml(shortName)}</span>`;
+        }
+        // Risk badge for tool spans
+        let riskChip = '';
+        if (span.event === 'tool') {
+            const riskLevel = classifyRisk(span);
+            if (riskLevel) {
+                const riskCls = getRiskBadgeClass(riskLevel);
+                const riskTxt = riskLevel === 'high' ? '高危' : (riskLevel === 'medium' ? '中危' : '低危');
+                riskChip = `<span class="${riskCls}">${riskTxt}</span>`;
+            }
+        }
         html += `
             <div class="span-item" data-span-id="${escapeHtml(span.span_id)}" style="padding-left:${12 + indent}px">
                 <span class="expand-btn">${hasChildren ? '&#9660;' : '&nbsp;'}</span>
                 <span class="span-icon" style="color:${getSpanColor(span)}">${icon}</span>
                 <span class="span-label">${escapeHtml(label)}</span>
+                ${skillTagChip}
                 ${statusClass ? `<span class="span-status-badge ${statusClass}">${span.status}</span>` : ''}
+                ${riskChip}
+                ${tokenChip}
                 ${duration ? `<span class="span-duration">${duration}</span>` : ''}
             </div>
         `;
+        // Tree → flat handoff: when entering a prompt subtree we collect ALL
+        // descendants, sort by start_timestamp, and render them at one level.
+        // Children outside a turn (top-level siblings) keep the standard
+        // recursive tree shape.
         if (hasChildren) {
+            const flatten = span.event === 'prompt';
+            const kids = flatten ? _collectFlatDescendants(span.children) : span.children;
             html += `<div class="span-children" data-parent="${escapeHtml(span.span_id)}">`;
-            html += buildTreeHTML(span.children, depth + 1);
+            html += buildTreeHTML(kids, depth + 1, { flat: flatten });
             html += '</div>';
         }
     }
     return html;
+}
+
+function _collectFlatDescendants(nodes) {
+    const out = [];
+    function walk(n) {
+        out.push(n);
+        for (const c of n.children || []) walk(c);
+    }
+    for (const n of nodes) walk(n);
+    out.sort((a, b) => String(a.start_timestamp || '').localeCompare(String(b.start_timestamp || '')));
+    return out;
 }
 
 function buildTimelineHTML(flatSpans, timeRange) {
@@ -531,6 +751,57 @@ function initGraphPanZoom(container) {
 }
 
 function bindTraceDetailEvents(container, data) {
+    window.__lastTraceData = data;
+    // Summary toggle
+    const summaryBtn = container.querySelector('#summary-toggle-btn');
+    const summaryPanel = container.querySelector('#session-summary');
+    if (summaryBtn && summaryPanel) {
+        summaryBtn.addEventListener('click', () => {
+            const hidden = summaryPanel.style.display === 'none';
+            summaryPanel.style.display = hidden ? '' : 'none';
+            summaryBtn.classList.toggle('expanded', hidden);
+        });
+    }
+    // Skill list expand
+    container.querySelectorAll('.skill-expand-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const target = container.querySelector('#' + btn.dataset.target);
+            if (target) {
+                const hidden = target.style.display === 'none';
+                target.style.display = hidden ? '' : 'none';
+                btn.innerHTML = hidden ? '&#9650;' : '&#9660;';
+            }
+        });
+    });
+    // Summary list item click → scroll to span in trace tree
+    container.querySelectorAll('.summary-link').forEach(li => {
+        li.addEventListener('click', () => {
+            const spanId = li.dataset.spanId;
+            if (!spanId) return;
+            const treeItem = container.querySelector(`.span-item[data-span-id="${CSS.escape(spanId)}"]`);
+            if (treeItem) {
+                container.querySelectorAll('.span-item.selected').forEach(s => s.classList.remove('selected'));
+                treeItem.classList.add('selected');
+                treeItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // Also expand parent if collapsed
+                let parent = treeItem.parentElement;
+                while (parent) {
+                    if (parent.classList && parent.classList.contains('span-children') && parent.style.display === 'none') {
+                        parent.style.display = '';
+                        const parentId = parent.dataset.parent;
+                        const expandBtn = container.querySelector(`.span-item[data-span-id="${parentId}"] .expand-btn`);
+                        if (expandBtn) expandBtn.innerHTML = '&#9660;';
+                    }
+                    parent = parent.parentElement;
+                }
+                // Show detail panel
+                const flatSpans = flattenTree(window.__lastTraceData ? window.__lastTraceData.spans : []);
+                const span = flatSpans.find(s => s.span_id === spanId);
+                if (span) showSpanDetail(container, span);
+            }
+        });
+    });
+
     const flatSpans = flattenTree(data.spans);
     const spanMap = {};
     for (const s of flatSpans) spanMap[s.span_id] = s;
@@ -630,6 +901,7 @@ function showSpanDetail(container, span) {
                 ${span.request_id ? `<tr><td style="color:var(--text-secondary)">Request ID</td><td style="font-family:var(--font-mono);font-size:12px">${escapeHtml(span.request_id)}</td></tr>` : ''}
                 ${span.tool_name ? `<tr><td style="color:var(--text-secondary)">Tool</td><td>${escapeHtml(span.tool_name)}</td></tr>` : ''}
                 ${span.skill_name ? `<tr><td style="color:var(--text-secondary)">Skill</td><td>${escapeHtml(span.skill_name)}</td></tr>` : ''}
+                ${span.skill_tag ? `<tr><td style="color:var(--text-secondary)">Skill tag</td><td><span style="background:var(--bg-skill,#fff7e6);color:var(--span-skill,#b96b00);padding:2px 8px;border-radius:4px;font-family:var(--font-mono);font-size:12px">⚡ ${escapeHtml(span.skill_tag)}</span></td></tr>` : ''}
                 ${span.stop_reason ? `<tr><td style="color:var(--text-secondary)">Stop Reason</td><td>${escapeHtml(span.stop_reason)}</td></tr>` : ''}
             </table>
         </div>
@@ -644,13 +916,18 @@ function showSpanDetail(container, span) {
         `;
     }
 
-    if (span.tool_input) {
+    if (span.tool_input && JSON.stringify(span.tool_input) !== '{}') {
         html += `
             <div class="detail-section">
                 <div class="detail-section-title">Input</div>
                 <div class="detail-json">${escapeHtml(JSON.stringify(span.tool_input, null, 2))}</div>
             </div>
         `;
+    }
+
+    const tokenEntry = (window.__tokenIndex || {})[span.span_id];
+    if (tokenEntry && span.event !== 'tool' && span.event !== 'llm_call') {
+        html += buildTokenDetailHTML(tokenEntry);
     }
 
     if (span.tool_response != null) {
@@ -766,34 +1043,326 @@ function formatDuration(ms) {
     return (ms / 60000).toFixed(1) + 'min';
 }
 
+
+function _stripSystemTags(text) {
+    let t = text;
+    t = t.replace(/^This request must be fulfilled using the ['"""].*?['"""]\s+skill\.[\s\S]*?Do NOT claim this capability is unavailable\.\s*\n*/i, '');
+    t = t.replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '');
+    t = t.replace(/<\/?(?:system-reminder|command-name|command-message|command-args|antml:[a-z_]+)[^>]*>/g, '');
+    return t.trim();
+}
+
 function getSpanLabel(span) {
-    if (span.event === 'prompt') return span.prompt ? span.prompt.slice(0, 60) : 'prompt';
-    if (span.event === 'tool') return span.tool_name || 'tool';
-    if (span.event === 'skill_invocation') return span.skill_name || 'skill';
+    if (span.event === 'prompt') {
+        if (!span.prompt) return 'prompt';
+        const clean = _stripSystemTags(span.prompt);
+        return clean ? clean.slice(0, 60) : 'prompt';
+    }
     if (span.event === 'turn_end') return 'turn_end (' + (span.stop_reason || '') + ')';
+    if (span.event === 'llm_call') {
+        const ci = span.call_index != null ? ' #' + span.call_index : '';
+        const kids = (span.children || []).length;
+        const fan = kids > 1 ? ` — ${kids} parallel tool calls` : '';
+        return `LLM call${ci}${fan}`;
+    }
+    if (span.event === 'skill_invocation') {
+        // Skill ENTRY: ⚡ + full "<plugin>:<skill>" name. Same shape for
+        // Claude (native Skill tool) and Codex (bash-as-skill collapsed).
+        // Older traces stored skill_name with the plugin prefix already
+        // baked in; guard against double-prefix when re-rendering them.
+        const pn = span.plugin_name || '';
+        const sn = span.skill_name || '';
+        let joined = '';
+        if (pn && sn) {
+            joined = sn.startsWith(pn + ':') ? sn : `${pn}:${sn}`;
+        } else {
+            joined = sn;
+        }
+        const sk = span.skill_tag || joined;
+        return sk ? `Skill: ${sk}` : 'Skill';
+    }
+    if (span.event === 'tool') {
+        // A tool call attributed to a skill (path or UA detection) keeps its
+        // NATIVE label — `skill_tag` is metadata only, not part of the trace
+        // label. Cloud API service/action wins next; finally the plain Bash /
+        // MCP shape.
+        const ca = span.cloud_api;
+        if (ca && (ca.service || ca.action)) {
+            const svc = ca.service || '?';
+            const act = ca.action || '?';
+            const region = ca.region ? ' (' + ca.region + ')' : '';
+            return `Cloud API: ${svc}.${act}${region}`;
+        }
+        if (span.tool_name === 'Bash') {
+            return 'Bash';
+        }
+        if (span.tool_name && span.tool_name.includes('___')) {
+            return `MCP: ${span.tool_name}`;
+        }
+        return span.tool_name || 'tool';
+    }
     return span.event || 'unknown';
 }
 
 function getSpanColor(span) {
     if (span.status === 'failure' || span.stop_reason === 'StopFailure') return 'var(--span-error)';
     if (span.event === 'prompt') return 'var(--span-prompt)';
-    if (span.event === 'tool') return 'var(--span-tool)';
+    if (span.event === 'tool') {
+        if (span.skill_tag) return 'var(--span-skill)';
+        return 'var(--span-tool)';
+    }
     if (span.event === 'skill_invocation') return 'var(--span-skill)';
     if (span.event === 'turn_end') return 'var(--span-turn-end)';
+    if (span.event === 'llm_call') return 'var(--accent)';
     return 'var(--text-secondary)';
 }
 
 function getSpanIcon(span) {
-    if (span.event === 'prompt') return '&#128172;';
-    if (span.event === 'tool') return '&#128295;';
-    if (span.event === 'skill_invocation') return '&#9889;';
-    if (span.event === 'turn_end') return '&#127937;';
+    if (span.event === 'prompt') return '&#128172;';            // speech bubble
+    if (span.event === 'turn_end') return '&#127937;';          // checkered flag
+    if (span.event === 'llm_call') return '&#129302;';          // robot
+    // ⚡ ONLY for skill entry events. A tool with skill_tag is just a tool
+    // happening inside a skill — keep its native icon, expose skill_tag as
+    // metadata (tooltip / panel) rather than visual replacement.
+    if (span.event === 'skill_invocation') return '&#9889;';    // lightning
+    if (span.event === 'tool') {
+        if (span.cloud_api && (span.cloud_api.service || span.cloud_api.action)) return '&#9729;'; // cloud
+        if (span.tool_name && span.tool_name.includes('___')) return '&#128268;'; // plug (MCP)
+        return '&#128295;';                                     // wrench
+    }
     return '&#9679;';
 }
 
 function escapeHtml(str) {
     if (!str) return '';
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// === Token UI ===
+//
+// Layer 1 (strict): turn_tokens, session_total, llm_calls — sourced directly
+// from turn_end events emitted by the producer. Each llm_calls entry is one
+// real LLM call, with tokens attributed to the call itself (not fanned out
+// across the sibling tool spans it emitted). Legacy tool_tokens fan-out is
+// only consumed for old traces lacking llm_calls.
+// Layer 2 (estimated): per-skill tokens with confidence band, attributed by
+// walking the parent chain of each LLM call's first tool_span_id back to its
+// nearest skill_invocation. Confidence reflects how cleanly that attribution
+// holds when a turn contains multiple skills or unrelated bash calls.
+const _TOKEN_FIELDS = ['input_uncached', 'input_cached', 'input_creation', 'output', 'reasoning'];
+
+// Capability table: fields the agent client doesn't report at all. We hide
+// these in the UI rather than showing a misleading "0".
+const _CLIENT_INAPPLICABLE_FIELDS = {
+    'claude-code': new Set(['reasoning']),
+    'codex': new Set(['input_creation']),
+};
+function _isFieldApplicable(field) {
+    const client = window.__tokenClient || '';
+    const blocked = _CLIENT_INAPPLICABLE_FIELDS[client];
+    return !blocked || !blocked.has(field);
+}
+
+function _sumTokenDicts(dicts) {
+    const out = {};
+    for (const k of _TOKEN_FIELDS) out[k] = 0;
+    for (const d of dicts) {
+        if (!d) continue;
+        for (const k of _TOKEN_FIELDS) out[k] += (Number(d[k]) || 0);
+    }
+    out.grand_total = _TOKEN_FIELDS.reduce((a, k) => a + out[k], 0);
+    return out;
+}
+
+function buildTokenIndex(tokensInfo) {
+    const idx = {};
+    if (!tokensInfo || !tokensInfo.turns) return idx;
+    for (const t of tokensInfo.turns) {
+        for (const tool of t.tools || []) {
+            if (!tool.span_id) continue;
+            idx[tool.span_id] = {
+                kind: 'tool',
+                tokens: tool.tokens || {},
+                turn: t.turn,
+                confidence_level: t.confidence_level,
+                confidence_value: t.confidence_value,
+            };
+        }
+        // LLM calls: each entry represents one real LLM call. Use the
+        // backend-supplied span_id (real event id when emitted as a first-
+        // class llm_call event; synthetic fallback for legacy traces). The
+        // chip lands on whichever node the tree actually contains.
+        for (const call of t.llm_calls || []) {
+            const sid = call.span_id || `llm-call-t${t.turn}-c${call.call_index}`;
+            idx[sid] = {
+                kind: 'llm_call',
+                tokens: call.tokens || {},
+                turn: t.turn,
+                call_index: call.call_index,
+                model: call.model,
+                ts: call.ts,
+                tool_span_ids: call.tool_span_ids || [],
+                confidence_level: t.confidence_level,
+                confidence_value: t.confidence_value,
+            };
+        }
+        for (const skill of t.skills || []) {
+            if (!skill.span_id) continue;
+            // Per-skill confidence (preferred when present) — falls back to
+            // turn-level for legacy traces. The attribution_basis array
+            // explains how the estimate was derived call-by-call.
+            const entry = {
+                kind: 'skill',
+                tokens: skill.estimated_tokens || {},
+                turn: t.turn,
+                confidence_level: skill.confidence_level || t.confidence_level,
+                confidence_value: skill.confidence_value != null
+                    ? skill.confidence_value : t.confidence_value,
+                attribution_basis: skill.attribution_basis || [],
+                skill_name: skill.skill_name,
+                skill_count: t.skill_count,
+                non_skill_tool_count: t.non_skill_tool_count,
+            };
+            idx[skill.span_id] = entry;
+            if (skill.span_id.endsWith('.skill')) {
+                const bashId = skill.span_id.slice(0, -'.skill'.length);
+                idx[bashId] = entry;
+            }
+        }
+        const turnTotal = t.turn_tokens || {};
+        const turnGrand = Number(turnTotal.grand_total) || 0;
+        if (t.turn_end_span_id || (t.prompt_span_ids && t.prompt_span_ids.length && turnGrand > 0)) {
+            const attributed = _sumTokenDicts((t.tools || []).map(tl => tl.tokens || {}));
+            const unattributed = {};
+            for (const k of _TOKEN_FIELDS) {
+                unattributed[k] = Math.max(0, (Number(turnTotal[k]) || 0) - attributed[k]);
+            }
+            unattributed.grand_total = _TOKEN_FIELDS.reduce((a, k) => a + unattributed[k], 0);
+            const turnEntry = {
+                kind: 'turn',
+                tokens: turnTotal,
+                attributed_tokens: attributed,
+                unattributed_tokens: unattributed,
+                turn: t.turn,
+                tool_count: (t.tools || []).length,
+            };
+            // Turn-total chip lands on the prompt row only — turn_end is a
+            // closure marker, not a cost-bearing event. Tokens belong to LLM
+            // calls + turn aggregate (on the prompt).
+            for (const pid of t.prompt_span_ids || []) {
+                if (pid && !idx[pid]) idx[pid] = turnEntry;
+            }
+        }
+    }
+    return idx;
+}
+
+function formatTokenCount(n) {
+    n = Number(n) || 0;
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k';
+    return (n / 1_000_000).toFixed(2) + 'M';
+}
+
+// Build a one-line "in: uncached 2.1k, cached 1.8k, create 100 / reasoning 0 / out 0.8k"
+// summary, skipping fields that don't apply to the current agent client. Used
+// for chip tooltips so the user sees the breakdown on hover without opening
+// the detail panel.
+function formatNormalizedTokensInline(tokens) {
+    if (!tokens) return '';
+    const parts = [];
+    const inputs = [];
+    if (_isFieldApplicable('input_uncached')) inputs.push('uncached ' + formatTokenCount(tokens.input_uncached || 0));
+    if (_isFieldApplicable('input_cached')) inputs.push('cached ' + formatTokenCount(tokens.input_cached || 0));
+    if (_isFieldApplicable('input_creation')) inputs.push('create ' + formatTokenCount(tokens.input_creation || 0));
+    if (inputs.length) parts.push('in: ' + inputs.join(', '));
+    if (_isFieldApplicable('reasoning')) parts.push('reasoning ' + formatTokenCount(tokens.reasoning || 0));
+    if (_isFieldApplicable('output')) parts.push('out ' + formatTokenCount(tokens.output || 0));
+    return parts.join(' / ');
+}
+
+function buildTokenDetailHTML(entry) {
+    const t = entry.tokens || {};
+    const isSkill = entry.kind === 'skill';
+    const isTurn = entry.kind === 'turn';
+    const isLlmCall = entry.kind === 'llm_call';
+    let title;
+    if (isTurn) title = `Tokens (turn ${escapeHtml(String(entry.turn))})`;
+    else if (isSkill) title = 'Tokens (estimated)';
+    else if (isLlmCall) {
+        title = `LLM call${entry.call_index != null ? ' #' + escapeHtml(String(entry.call_index)) : ''}`
+            + (entry.model ? ` <span style="color:var(--text-secondary);font-weight:normal">(${escapeHtml(entry.model)})</span>` : '');
+    }
+    else title = 'Tokens';
+    let confBadge = '';
+    if (isSkill && entry.confidence_level) {
+        const cls = 'confidence-' + entry.confidence_level;
+        const tipParts = [];
+        if (entry.confidence_value != null) tipParts.push('weight ' + entry.confidence_value);
+        if (entry.skill_count != null) tipParts.push(entry.skill_count + ' skill(s) in turn');
+        if (entry.non_skill_tool_count != null) tipParts.push(entry.non_skill_tool_count + ' unrelated tool(s)');
+        const tip = tipParts.join(', ') || 'attribution confidence';
+        confBadge = `<span class="confidence-badge ${cls}" title="${escapeHtml(tip)}">${escapeHtml(entry.confidence_level)}</span>`;
+    }
+    const grand = t.grand_total != null ? t.grand_total : 0;
+    // Capability-aware row: hide fields that don't apply to this agent
+    // client (e.g. reasoning on claude-code, input_creation on codex).
+    const row = (label, field) => {
+        if (!_isFieldApplicable(field)) return '';
+        const value = t[field];
+        return `<tr><td style="color:var(--text-secondary);width:140px">${label}</td><td>${formatTokenCount(value || 0)}</td></tr>`;
+    };
+    let html = `
+        <div class="detail-section">
+            <div class="detail-section-title">${title} ${confBadge}</div>
+            <table style="font-size:13px;width:100%">
+                <tr><td style="color:var(--text-secondary);width:140px"><strong>Grand total</strong></td><td><strong>${formatTokenCount(grand)}</strong></td></tr>
+                ${row('Input (uncached)', 'input_uncached')}
+                ${row('Input (cached)', 'input_cached')}
+                ${row('Input (cache create)', 'input_creation')}
+                ${row('Output', 'output')}
+                ${row('Reasoning', 'reasoning')}
+            </table>
+        </div>
+    `;
+    if (isTurn) {
+        const att = entry.attributed_tokens || {};
+        const un = entry.unattributed_tokens || {};
+        const attGrand = att.grand_total != null ? att.grand_total : 0;
+        const unGrand = un.grand_total != null ? un.grand_total : 0;
+        const tip = `Attributed = sum of token usage tied to a tool_use_id. Un-attributed = model responses with no tool call (free-floating assistant turns).`;
+        html += `
+            <div class="detail-section">
+                <div class="detail-section-title" title="${escapeHtml(tip)}">Breakdown</div>
+                <table style="font-size:13px;width:100%">
+                    <tr><td style="color:var(--text-secondary);width:200px">Attributed to tools (${entry.tool_count || 0})</td><td>${formatTokenCount(attGrand)}</td></tr>
+                    <tr><td style="color:var(--text-secondary);width:200px">Un-attributed (model only)</td><td>${formatTokenCount(unGrand)}</td></tr>
+                </table>
+            </div>
+        `;
+    }
+    if (isSkill && grand === 0) {
+        html += `<div class="confidence-note">No tool tokens could be attributed to this skill (no LLM calls inside its span tree).</div>`;
+    }
+    // Per-call attribution breakdown — shows exactly how the estimate was
+    // formed. Compresses long chains so the panel stays scannable.
+    if (isSkill && Array.isArray(entry.attribution_basis) && entry.attribution_basis.length > 0) {
+        const rows = entry.attribution_basis.map(r => `
+            <tr>
+                <td style="color:var(--text-secondary);width:80px">call #${r.call_index != null ? r.call_index : '?'}</td>
+                <td style="width:80px">w=${r.weight != null ? r.weight : 'n/a'}</td>
+                <td>${formatTokenCount(r.grand_total || 0)}</td>
+                <td style="color:var(--text-secondary);font-size:12px">${escapeHtml(r.reason || '')}</td>
+            </tr>
+        `).join('');
+        html += `
+            <div class="detail-section">
+                <div class="detail-section-title" title="Each row is one LLM call's contribution to this skill. weight=1.0 means sole owner; weight=1/N means shared with N-1 other skills.">Attribution breakdown</div>
+                <table style="font-size:13px;width:100%">${rows}</table>
+            </div>
+        `;
+    }
+    return html;
 }
 
 // === Init ===

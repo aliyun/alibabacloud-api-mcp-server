@@ -45,6 +45,12 @@ _PLUGIN_TELEMETRY_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("plugin_name", "pluginName", False),
     ("span_id", "spanId", False),
     ("parent_span_id", "parentSpanId", False),
+    ("skill_tag", "skillTag", False),
+    ("input_uncached_tokens", "inputUncachedTokens", False),
+    ("input_cached_tokens", "inputCachedTokens", False),
+    ("input_creation_tokens", "inputCreationTokens", False),
+    ("output_tokens", "outputTokens", False),
+    ("reasoning_tokens", "reasoningTokens", False),
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -271,6 +277,18 @@ def _add_plugin_telemetry_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--plugin-name", dest="plugin_name", help="Plugin name, e.g. 'alibabacloud'.")
     parser.add_argument("--span-id", dest="span_id", help="Trace span identifier.")
     parser.add_argument("--parent-span-id", dest="parent_span_id", help="Parent trace span identifier.")
+    parser.add_argument("--skill-tag", dest="skill_tag",
+                        help="Skill tag inferred from the tool input path.")
+    parser.add_argument("--input-uncached-tokens", dest="input_uncached_tokens", type=int,
+                        help="LLM input tokens not served from cache (int32).")
+    parser.add_argument("--input-cached-tokens", dest="input_cached_tokens", type=int,
+                        help="LLM input tokens served from cache (int32).")
+    parser.add_argument("--input-creation-tokens", dest="input_creation_tokens", type=int,
+                        help="LLM input tokens consumed creating cache entries (int32).")
+    parser.add_argument("--output-tokens", dest="output_tokens", type=int,
+                        help="LLM output tokens (int32).")
+    parser.add_argument("--reasoning-tokens", dest="reasoning_tokens", type=int,
+                        help="LLM reasoning output tokens (int32).")
     # ── operational flags ─────────────────────────────────────────────────
     parser.add_argument("--verbose", action="store_true",
                         help="Log INFO+ to stderr (default: WARNING+).")

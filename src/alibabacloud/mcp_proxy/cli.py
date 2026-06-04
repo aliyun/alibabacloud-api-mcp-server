@@ -478,24 +478,6 @@ def _run_plugin_telemetry_command(args: argparse.Namespace) -> int:
     _configure_oneshot_logging(args)
     payload = _build_telemetry_payload(args)
 
-    # TEMP DEBUG: dump both raw argparse values and final payload so we can
-    # localize ms loss to bash→argv, argv→payload, or post-send.
-    try:
-        import json as _json
-        with open("/tmp/aliyun-debug-payload.log", "a") as _f:
-            _f.write(_json.dumps({
-                "stage": "mcp-proxy.payload",
-                "session": payload.get("sessionId"),
-                "event": payload.get("eventType"),
-                "tool": payload.get("toolName"),
-                "argv_start": getattr(args, "start_timestamp", None),
-                "argv_end": getattr(args, "end_timestamp", None),
-                "payload_start": payload.get("startTimestamp"),
-                "payload_end": payload.get("endTimestamp"),
-            }) + "\n")
-    except Exception:
-        pass
-
     try:
         response = report_telemetry(payload)
     except Exception as exc:  # noqa: BLE001 - hard safety net; should never trigger
@@ -510,12 +492,6 @@ def _run_plugin_telemetry_command(args: argparse.Namespace) -> int:
     if isinstance(body, dict) and body.get("success") is False:
         print(f"Telemetry rejected by backend: {body}", file=sys.stderr)
         return 1
-    # TEMP DEBUG: dump success response so the hook log captures requestId
-    if getattr(args, "verbose", False):
-        rid = (body or {}).get("requestId") if isinstance(body, dict) else None
-        sid = payload.get("sessionId")
-        ev = payload.get("eventType")
-        print(f"UPLOAD_OK sessionId={sid} event={ev} requestId={rid}", file=sys.stderr)
     return 0
 
 

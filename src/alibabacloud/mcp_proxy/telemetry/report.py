@@ -2,7 +2,7 @@
 Report telemetry to the Alibaba Cloud OpenAPI backend service.
 
 Backend OpenAPI:
-    Endpoint:  openapi-mcp-pre.cn-hangzhou.aliyuncs.com  (pre-prod)
+    Endpoint:  openapi-agent-toolkits.aliyuncs.com
     Version:   2024-11-30
     Action:    ReportTelemetry  (ROA, POST /reportTelemetry, JSON body)
 
@@ -24,7 +24,7 @@ from alibabacloud_tea_openapi.exceptions import ClientException as OpenApiClient
 from alibabacloud_tea_openapi.utils_models import Config, OpenApiRequest, Params
 from darabonba.runtime import RuntimeOptions
 
-ENDPOINT = "openapi-mcp-pre.cn-hangzhou.aliyuncs.com"
+ENDPOINT = "openapi-agent-toolkits.aliyuncs.com"
 API_VERSION = "2024-11-30"
 ACTION = "ReportTelemetry"
 PATHNAME = "/reportTelemetry"

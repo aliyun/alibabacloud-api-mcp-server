@@ -254,6 +254,156 @@ async function renderTraceDetail(container, client, sessionId) {
     }
 }
 
+// === Risk Classification ===
+function classifyRisk(span) {
+    if (span.event !== 'tool') return null;
+    // help commands are always low risk regardless of the action verb
+    if (span.tool_input && span.tool_input.command && /\bhelp\b/i.test(span.tool_input.command)) return 'low';
+    // Only extract the ACTION verb, not the full parameter values
+    let actionName = '';
+    if (span.cloud_api && span.cloud_api.action) {
+        actionName = span.cloud_api.action.toLowerCase();
+    } else if (span.tool_input && span.tool_input.command) {
+        const cmd = span.tool_input.command.trim();
+        // IaC service: classify by specific subcommand
+        const iacM = cmd.match(/\baliyun\s+iacservice\s+([\w-]+)/);
+        if (iacM) {
+            const iacAction = iacM[1].toLowerCase();
+            if (/apply|execute-terraform-apply/i.test(iacAction)) return 'high';
+            if (/execute-terraform-plan|plan/i.test(iacAction)) return 'medium';
+            return 'low';
+        }
+        const m = cmd.match(/\baliyun\s+[\w-]+\s+([\w-]+)/);
+        if (m) actionName = m[1].toLowerCase();
+        else actionName = cmd.split(/\s+/).slice(0, 3).join(' ').toLowerCase();
+    } else if (span.tool_name) {
+        actionName = span.tool_name.toLowerCase();
+    }
+    if (/\b(update|modify|put|post|add|delete|remove|run|start|stop|reboot|create)/i.test(actionName)) return 'high';
+    if (/\b(allocate|attach|assign)/i.test(actionName)) return 'medium';
+    if (/\b(search|list|get|describe|read|find|call|version|configure|help|query)/i.test(actionName)) return 'low';
+    // Any alibabacloud MCP or aliyun bash call defaults to low if no keyword matched
+    const isAli = (span.tool_name && span.tool_name.includes('alibabacloud'))
+        || (span.tool_input && span.tool_input.command && /\baliyun\b/.test(span.tool_input.command))
+        || (span.cloud_api && (span.cloud_api.service || span.cloud_api.action));
+    if (isAli) return 'low';
+    return null;
+}
+
+function getRiskLabel(level) {
+    if (level === 'high') return '\u{1F534} 高危';
+    if (level === 'medium') return '\u{1F7E1} 中危';
+    if (level === 'low') return '\u{1F7E2} 低危';
+    return '';
+}
+
+function getRiskBadgeClass(level) {
+    if (level === 'high') return 'risk-badge risk-badge-high';
+    if (level === 'medium') return 'risk-badge risk-badge-medium';
+    if (level === 'low') return 'risk-badge risk-badge-low';
+    return '';
+}
+
+function getToolDisplayName(span) {
+    if (span.cloud_api && (span.cloud_api.service || span.cloud_api.action)) {
+        return `aliyun ${span.cloud_api.service || '?'} ${span.cloud_api.action || '?'}`;
+    }
+    if (span.tool_name === 'Bash' && span.tool_input && span.tool_input.command) {
+        const cmd = span.tool_input.command.replace(/\s*2>&1\s*/g, '').trim();
+        const m = cmd.match(/\baliyun\s+[\w-]+(?:\s+[\w-]+)?/);
+        if (m) return m[0];
+        return cmd.slice(0, 60);
+    }
+    if (span.tool_name && span.tool_name.includes('___')) {
+        const parts = span.tool_name.split('___');
+        return parts.length >= 2 ? `mcp ${parts[parts.length - 1]}` : span.tool_name;
+    }
+    return span.tool_name || 'unknown';
+}
+
+function buildSessionSummaryHTML(data) {
+    const flatSpans = flattenTree(data.spans);
+    const st = data.stats || {};
+
+    // Duration
+    const startTs = data.start_time ? new Date(data.start_time).getTime() : 0;
+    const endTs = data.last_activity ? new Date(data.last_activity).getTime() : 0;
+    const durationMs = endTs - startTs;
+    const durationStr = durationMs > 0 ? formatDuration(durationMs) : '-';
+
+    // Alibaba Cloud CLI/API calls
+    let aliCalls = 0, aliSuccess = 0, aliFail = 0;
+    const highRiskOps = [], medRiskOps = [], lowRiskOps = [];
+
+    for (const span of flatSpans) {
+        if (span.event !== 'tool') continue;
+        const isAliTool = (span.tool_name && span.tool_name.includes('alibabacloud'))
+            || (span.tool_input && span.tool_input.command && /\baliyun\b/.test(span.tool_input.command))
+            || (span.cloud_api && (span.cloud_api.service || span.cloud_api.action));
+        if (isAliTool) {
+            aliCalls++;
+            if (span.status === 'success') aliSuccess++;
+            else if (span.status === 'failure') aliFail++;
+        }
+
+        const risk = classifyRisk(span);
+        if (!risk) continue;
+        const displayName = getToolDisplayName(span);
+        const entry = { name: displayName, spanId: span.span_id };
+        if (risk === 'high') highRiskOps.push(entry);
+        else if (risk === 'medium') medRiskOps.push(entry);
+        else if (risk === 'low') lowRiskOps.push(entry);
+    }
+
+    // Skills list
+    const skillEntries = [];
+    for (const span of flatSpans) {
+        if (span.event === 'skill_invocation') {
+            const name = span.skill_name || span.skill_tag || 'unknown';
+            skillEntries.push({ name, spanId: span.span_id });
+        }
+    }
+
+    const skillListItems = skillEntries.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const highListItems = highRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const medListItems = medRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+    const lowListItems = lowRiskOps.map(s => `<li class="summary-link" data-span-id="${escapeHtml(s.spanId)}">${escapeHtml(s.name)}</li>`).join('');
+
+    return `
+        <div class="summary-section">
+            <div class="summary-section-title">Summary</div>
+            <div class="summary-item">总共 <strong>${st.turns || 0}</strong> 轮对话、耗时 <strong>${durationStr}</strong></div>
+        </div>
+        <div class="summary-section">
+            <div class="summary-section-title">使用摘要</div>
+            <div class="summary-item">阿里云 CLI/API 调用 <strong>${aliSuccess}/${aliCalls}</strong> 成功${aliFail > 0 ? `，<span style="color:var(--span-error)">${aliFail} 失败</span>` : ''}</div>
+            <div class="summary-item">使用了 <strong>${skillEntries.length}</strong> 个 SKILL：
+                ${skillEntries.length > 0 ? `<button class="skill-expand-btn" data-target="skill-list-detail">&#9660;</button>` : ''}
+            </div>
+            ${skillEntries.length > 0 ? `<ul class="summary-list" id="skill-list-detail" style="display:none">${skillListItems}</ul>` : ''}
+            <div class="summary-item">进行了 <strong>1</strong> 轮 HITL 审批链接</div>
+        </div>
+        <div class="summary-section">
+            <div class="summary-section-title">风险摘要</div>
+            <div class="summary-item" title="update / put / post / add 相关">
+                <span class="risk-badge risk-badge-high">高危</span> 操作 <strong>${highRiskOps.length}</strong> 次
+                ${highRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-high-list">&#9660;</button>` : ''}
+            </div>
+            ${highRiskOps.length > 0 ? `<ul class="summary-list" id="risk-high-list" style="display:none">${highListItems}</ul>` : ''}
+            <div class="summary-item" title="create 相关">
+                <span class="risk-badge risk-badge-medium">中危</span> 操作 <strong>${medRiskOps.length}</strong> 次
+                ${medRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-med-list">&#9660;</button>` : ''}
+            </div>
+            ${medRiskOps.length > 0 ? `<ul class="summary-list" id="risk-med-list" style="display:none">${medListItems}</ul>` : ''}
+            <div class="summary-item" title="search / list / get / describe 相关">
+                <span class="risk-badge risk-badge-low">低危</span> 操作 <strong>${lowRiskOps.length}</strong> 次
+                ${lowRiskOps.length > 0 ? `<button class="skill-expand-btn" data-target="risk-low-list">&#9660;</button>` : ''}
+            </div>
+            ${lowRiskOps.length > 0 ? `<ul class="summary-list" id="risk-low-list" style="display:none">${lowListItems}</ul>` : ''}
+        </div>
+    `;
+}
+
 function buildTraceDetailHTML(data) {
     const logo = CLIENT_LOGOS[data.client] || CLIENT_LOGOS['qoderwork'];
     const flatSpans = flattenTree(data.spans);
@@ -278,6 +428,8 @@ function buildTraceDetailHTML(data) {
             </span>
         </div>
         <div class="stats-bar">
+            <span class="stat-item" style="font-weight:600;color:var(--accent)">Summary</span>
+            <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.turns || 0}</strong> turns</span>
             <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.tools || 0}</strong> tools</span>
@@ -286,14 +438,16 @@ function buildTraceDetailHTML(data) {
             <span class="stat-divider"></span>
             <span class="stat-item"><strong>${st.prompts || 0}</strong> prompts</span>
             <span class="stat-divider"></span>
-            <span class="stat-item success">${st.success || 0} ok</span>
+            <span class="stat-item success">${st.success || 0} success</span>
             <span class="stat-item failure">${st.failure || 0} fail</span>
             <span class="stat-divider"></span>
             <span class="stat-item">Rate: <strong>${st.success_rate || 0}%</strong></span>
-            <span class="stat-divider"></span>
-            <span class="stat-item" title="Sum of LLM tokens across all traced turns (strict / Layer 1).">
-                <strong>${formatTokenCount(sessionTotal)}</strong> tokens
-            </span>
+            <button class="summary-toggle-btn" id="summary-toggle-btn">
+                <span class="toggle-arrow">&#9660;</span>
+            </button>
+        </div>
+        <div class="session-summary" id="session-summary" style="display:none">
+            ${buildSessionSummaryHTML(data)}
         </div>
         <div class="trace-layout">
             <div class="trace-tree" id="trace-tree">
@@ -367,6 +521,16 @@ function buildTreeHTML(spans, depth, opts) {
                 : span.skill_tag;
             skillTagChip = `<span class="span-skill-tag" title="Attributed to skill ${escapeHtml(span.skill_tag)}" style="background:var(--bg-skill,#fff7e6);color:var(--span-skill,#b96b00);padding:1px 6px;border-radius:3px;font-size:11px;margin-left:6px">&#9889; ${escapeHtml(shortName)}</span>`;
         }
+        // Risk badge for tool spans
+        let riskChip = '';
+        if (span.event === 'tool') {
+            const riskLevel = classifyRisk(span);
+            if (riskLevel) {
+                const riskCls = getRiskBadgeClass(riskLevel);
+                const riskTxt = riskLevel === 'high' ? '高危' : (riskLevel === 'medium' ? '中危' : '低危');
+                riskChip = `<span class="${riskCls}">${riskTxt}</span>`;
+            }
+        }
         html += `
             <div class="span-item" data-span-id="${escapeHtml(span.span_id)}" style="padding-left:${12 + indent}px">
                 <span class="expand-btn">${hasChildren ? '&#9660;' : '&nbsp;'}</span>
@@ -374,6 +538,7 @@ function buildTreeHTML(spans, depth, opts) {
                 <span class="span-label">${escapeHtml(label)}</span>
                 ${skillTagChip}
                 ${statusClass ? `<span class="span-status-badge ${statusClass}">${span.status}</span>` : ''}
+                ${riskChip}
                 ${tokenChip}
                 ${duration ? `<span class="span-duration">${duration}</span>` : ''}
             </div>
@@ -594,6 +759,57 @@ function initGraphPanZoom(container) {
 }
 
 function bindTraceDetailEvents(container, data) {
+    window.__lastTraceData = data;
+    // Summary toggle
+    const summaryBtn = container.querySelector('#summary-toggle-btn');
+    const summaryPanel = container.querySelector('#session-summary');
+    if (summaryBtn && summaryPanel) {
+        summaryBtn.addEventListener('click', () => {
+            const hidden = summaryPanel.style.display === 'none';
+            summaryPanel.style.display = hidden ? '' : 'none';
+            summaryBtn.classList.toggle('expanded', hidden);
+        });
+    }
+    // Skill list expand
+    container.querySelectorAll('.skill-expand-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const target = container.querySelector('#' + btn.dataset.target);
+            if (target) {
+                const hidden = target.style.display === 'none';
+                target.style.display = hidden ? '' : 'none';
+                btn.innerHTML = hidden ? '&#9650;' : '&#9660;';
+            }
+        });
+    });
+    // Summary list item click → scroll to span in trace tree
+    container.querySelectorAll('.summary-link').forEach(li => {
+        li.addEventListener('click', () => {
+            const spanId = li.dataset.spanId;
+            if (!spanId) return;
+            const treeItem = container.querySelector(`.span-item[data-span-id="${spanId}"]`);
+            if (treeItem) {
+                container.querySelectorAll('.span-item.selected').forEach(s => s.classList.remove('selected'));
+                treeItem.classList.add('selected');
+                treeItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // Also expand parent if collapsed
+                let parent = treeItem.parentElement;
+                while (parent) {
+                    if (parent.classList && parent.classList.contains('span-children') && parent.style.display === 'none') {
+                        parent.style.display = '';
+                        const parentId = parent.dataset.parent;
+                        const expandBtn = container.querySelector(`.span-item[data-span-id="${parentId}"] .expand-btn`);
+                        if (expandBtn) expandBtn.innerHTML = '&#9660;';
+                    }
+                    parent = parent.parentElement;
+                }
+                // Show detail panel
+                const flatSpans = flattenTree(window.__lastTraceData ? window.__lastTraceData.spans : []);
+                const span = flatSpans.find(s => s.span_id === spanId);
+                if (span) showSpanDetail(container, span);
+            }
+        });
+    });
+
     const flatSpans = flattenTree(data.spans);
     const spanMap = {};
     for (const s of flatSpans) spanMap[s.span_id] = s;
@@ -708,7 +924,7 @@ function showSpanDetail(container, span) {
         `;
     }
 
-    if (span.tool_input) {
+    if (span.tool_input && JSON.stringify(span.tool_input) !== '{}') {
         html += `
             <div class="detail-section">
                 <div class="detail-section-title">Input</div>
@@ -718,7 +934,7 @@ function showSpanDetail(container, span) {
     }
 
     const tokenEntry = (window.__tokenIndex || {})[span.span_id];
-    if (tokenEntry) {
+    if (tokenEntry && span.event !== 'tool' && span.event !== 'llm_call') {
         html += buildTokenDetailHTML(tokenEntry);
     }
 
@@ -890,8 +1106,20 @@ function _skillTargetLabel(toolName, toolInput) {
     return '';
 }
 
+function _stripSystemTags(text) {
+    let t = text;
+    t = t.replace(/^This request must be fulfilled using the ['"""].*?['"""]\s+skill\.[\s\S]*?Do NOT claim this capability is unavailable\.\s*\n*/i, '');
+    t = t.replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '');
+    t = t.replace(/<[^>]+>[\s\S]*?(<\/[^>]+>|$)/g, '');
+    return t.trim();
+}
+
 function getSpanLabel(span) {
-    if (span.event === 'prompt') return span.prompt ? span.prompt.slice(0, 60) : 'prompt';
+    if (span.event === 'prompt') {
+        if (!span.prompt) return 'prompt';
+        const clean = _stripSystemTags(span.prompt);
+        return clean ? clean.slice(0, 60) : 'prompt';
+    }
     if (span.event === 'turn_end') return 'turn_end (' + (span.stop_reason || '') + ')';
     if (span.event === 'llm_call') {
         const ci = span.call_index != null ? ' #' + span.call_index : '';
@@ -928,9 +1156,7 @@ function getSpanLabel(span) {
             return `Cloud API: ${svc}.${act}${region}`;
         }
         if (span.tool_name === 'Bash') {
-            const cmd = String((span.tool_input && span.tool_input.command) || '')
-                .replace(/\s+/g, ' ').trim().slice(0, 60);
-            return cmd ? `Bash: ${cmd}` : 'Bash';
+            return 'Bash';
         }
         if (span.tool_name && span.tool_name.includes('___')) {
             return `MCP: ${span.tool_name}`;

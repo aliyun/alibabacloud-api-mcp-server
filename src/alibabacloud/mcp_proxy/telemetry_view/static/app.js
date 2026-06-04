@@ -79,7 +79,7 @@ async function renderSessionList(container) {
         bindSessionListEvents(container);
     } catch (err) {
         if (err.name === 'AbortError') return;
-        container.innerHTML = '<div class="loading">Error loading sessions: ' + err.message + '</div>';
+        container.innerHTML = '<div class="loading">Error loading sessions: ' + escapeHtml(err.message) + '</div>';
     } finally {
         if (inflightController === ctrl) inflightController = null;
     }
@@ -247,7 +247,7 @@ async function renderTraceDetail(container, client, sessionId) {
     } catch (err) {
         if (err.name === 'AbortError') return;
         if (!sameSession) {
-            container.innerHTML = '<div class="loading">Error: ' + err.message + '</div>';
+            container.innerHTML = '<div class="loading">Error: ' + escapeHtml(err.message) + '</div>';
         }
     } finally {
         if (inflightController === ctrl) inflightController = null;
@@ -288,13 +288,6 @@ function classifyRisk(span) {
         || (span.cloud_api && (span.cloud_api.service || span.cloud_api.action));
     if (isAli) return 'low';
     return null;
-}
-
-function getRiskLabel(level) {
-    if (level === 'high') return '\u{1F534} 高危';
-    if (level === 'medium') return '\u{1F7E1} 中危';
-    if (level === 'low') return '\u{1F7E2} 低危';
-    return '';
 }
 
 function getRiskBadgeClass(level) {
@@ -410,7 +403,6 @@ function buildTraceDetailHTML(data) {
     const timeRange = getTimeRange(flatSpans);
     const st = data.stats || {};
     const tokensInfo = data.tokens || { session_total: { grand_total: 0 }, turns: [] };
-    const sessionTotal = (tokensInfo.session_total && tokensInfo.session_total.grand_total) || 0;
     // Token map for fast span-detail lookups: span_id → {kind, tokens, ...}
     window.__tokenIndex = buildTokenIndex(tokensInfo);
     // Agent client name, used by capability-aware token rendering to hide
@@ -786,7 +778,7 @@ function bindTraceDetailEvents(container, data) {
         li.addEventListener('click', () => {
             const spanId = li.dataset.spanId;
             if (!spanId) return;
-            const treeItem = container.querySelector(`.span-item[data-span-id="${spanId}"]`);
+            const treeItem = container.querySelector(`.span-item[data-span-id="${CSS.escape(spanId)}"]`);
             if (treeItem) {
                 container.querySelectorAll('.span-item.selected').forEach(s => s.classList.remove('selected'));
                 treeItem.classList.add('selected');
@@ -1051,66 +1043,12 @@ function formatDuration(ms) {
     return (ms / 60000).toFixed(1) + 'min';
 }
 
-function _skillRelPath(toolInput) {
-    // Returns the path SEGMENT after /skills/<skill>/, e.g. "SKILL.md",
-    // "references/foo.md", "scripts/bar.py". Empty if no skill path is found.
-    if (!toolInput || typeof toolInput !== 'object') return '';
-    const candidates = [toolInput.file_path, toolInput.filePath, toolInput.path,
-                        toolInput.command, toolInput.pattern];
-    for (const v of candidates) {
-        if (typeof v !== 'string' || !v) continue;
-        const m = v.replace(/\\/g, '/').match(/\/skills\/[^\/]+\/([^\s'"`]+)/);
-        if (m) return m[1];
-    }
-    return '';
-}
-
-function _toolVerb(toolName) {
-    switch (toolName) {
-        case 'Bash':  return 'run';
-        case 'Read':  return 'read';
-        case 'Edit':  return 'edit';
-        case 'Write': return 'write';
-        case 'Grep':  return 'search';
-        case 'Glob':  return 'search';
-        default: return (toolName || 'use').toLowerCase();
-    }
-}
-
-function _skillName(skillTag) {
-    // skill_tag is "<plugin>:<skill>" — show only the skill, plugin lives in tooltip.
-    if (!skillTag) return '';
-    const i = skillTag.indexOf(':');
-    return i >= 0 ? skillTag.slice(i + 1) : skillTag;
-}
-
-function _skillTargetLabel(toolName, toolInput) {
-    // Display the relative path (basename if it's at the skill root, else
-    // last path segment) for path-based skill detection. For UA-based skill
-    // detection (no skill path), surface the meaningful command head so users
-    // see what the skill actually did.
-    const rel = _skillRelPath(toolInput);
-    if (rel) {
-        const parts = rel.split('/');
-        return parts[parts.length - 1].slice(0, 40);
-    }
-    if (toolName === 'Bash') {
-        // UA-tagged aliyun call: strip env prefixes, show "aliyun <svc> <act>".
-        const cmd = String((toolInput && toolInput.command) || '');
-        const m = cmd.match(/\baliyun\s+([\w-]+)(?:\s+([\w-]+))?/);
-        if (m) {
-            return ('aliyun ' + m[1] + (m[2] ? ' ' + m[2] : '')).slice(0, 40);
-        }
-        return 'script';
-    }
-    return '';
-}
 
 function _stripSystemTags(text) {
     let t = text;
     t = t.replace(/^This request must be fulfilled using the ['"""].*?['"""]\s+skill\.[\s\S]*?Do NOT claim this capability is unavailable\.\s*\n*/i, '');
     t = t.replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '');
-    t = t.replace(/<[^>]+>[\s\S]*?(<\/[^>]+>|$)/g, '');
+    t = t.replace(/<\/?(?:system-reminder|command-name|command-message|command-args|antml:[a-z_]+)[^>]*>/g, '');
     return t.trim();
 }
 
@@ -1349,10 +1287,10 @@ function buildTokenDetailHTML(entry) {
     const isTurn = entry.kind === 'turn';
     const isLlmCall = entry.kind === 'llm_call';
     let title;
-    if (isTurn) title = `Tokens (turn ${entry.turn})`;
+    if (isTurn) title = `Tokens (turn ${escapeHtml(String(entry.turn))})`;
     else if (isSkill) title = 'Tokens (estimated)';
     else if (isLlmCall) {
-        title = `LLM call${entry.call_index != null ? ' #' + entry.call_index : ''}`
+        title = `LLM call${entry.call_index != null ? ' #' + escapeHtml(String(entry.call_index)) : ''}`
             + (entry.model ? ` <span style="color:var(--text-secondary);font-weight:normal">(${escapeHtml(entry.model)})</span>` : '');
     }
     else title = 'Tokens';

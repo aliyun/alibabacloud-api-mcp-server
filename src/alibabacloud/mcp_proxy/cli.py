@@ -42,7 +42,6 @@ _PLUGIN_TELEMETRY_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("tool_request_id", "toolRequestId", False),
     ("error_message", "errorMessage", False),
     ("plugin_name", "pluginName", False),
-    ("skill_tag", "skillTag", False),
     ("input_uncached_tokens", "inputUncachedTokens", False),
     ("input_cached_tokens", "inputCachedTokens", False),
     ("input_creation_tokens", "inputCreationTokens", False),

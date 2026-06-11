@@ -14,12 +14,8 @@ to avoid telemetry disrupting the host application.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import time
-import urllib.error
-import urllib.request
 from typing import Any
 
 from alibabacloud_credentials.client import Client as CredentialClient
@@ -32,8 +28,6 @@ ENDPOINT = "openapi-agent-toolkits.aliyuncs.com"
 API_VERSION = "2024-11-30"
 ACTION = "ReportTelemetry"
 PATHNAME = "/reportTelemetry"
-LOCAL_REPORT_URL_ENV = "ALIBABACLOUD_TELEMETRY_REPORT_URL"
-ENDPOINT_ENV = "ALIBABACLOUD_TELEMETRY_ENDPOINT"
 
 USER_AGENT = "AlibabaCloud-MCP-Proxy/telemetry"
 
@@ -54,26 +48,12 @@ _LOGGER = logging.getLogger(__name__)
 _client_singleton: OpenApiClient | None = None
 
 
-def _endpoint() -> str:
-    """Return OpenAPI endpoint host, optionally overridden for pre-release."""
-    raw = os.environ.get(ENDPOINT_ENV, "").strip()
-    if not raw:
-        return ENDPOINT
-    endpoint = raw
-    for prefix in ("https://", "http://"):
-        if endpoint.startswith(prefix):
-            endpoint = endpoint[len(prefix):]
-            break
-    endpoint = endpoint.split("/", 1)[0].strip()
-    return endpoint or ENDPOINT
-
-
 def _create_client() -> OpenApiClient:
     """Build an OpenAPI client using the default Alibaba Cloud credential chain."""
     credential = CredentialClient()
     config = Config(
         credential=credential,
-        endpoint=_endpoint(),
+        endpoint=ENDPOINT,
         user_agent=USER_AGENT,
     )
     return OpenApiClient(config)
@@ -109,51 +89,6 @@ def _build_runtime() -> RuntimeOptions:
     runtime.connect_timeout = CONNECT_TIMEOUT_MS
     runtime.read_timeout = READ_TIMEOUT_MS
     return runtime
-
-
-def _local_report_url() -> str | None:
-    url = os.environ.get(LOCAL_REPORT_URL_ENV)
-    if url and url.strip():
-        return url.strip()
-    return None
-
-
-def _parse_response_body(raw: bytes) -> Any:
-    text = raw.decode("utf-8", errors="replace")
-    if not text:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return text
-
-
-def _post_local_report(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
-        },
-        method="POST",
-    )
-    timeout_s = max(READ_TIMEOUT_MS, CONNECT_TIMEOUT_MS) / 1000
-    try:
-        # The URL is an explicit developer override for local testing.
-        with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
-            return {
-                "statusCode": response.getcode(),
-                "headers": dict(response.headers.items()),
-                "body": _parse_response_body(response.read()),
-            }
-    except urllib.error.HTTPError as exc:
-        return {
-            "statusCode": exc.code,
-            "headers": dict(exc.headers.items()) if exc.headers else {},
-            "body": _parse_response_body(exc.read()),
-        }
 
 
 def _validate_payload(payload: Any) -> bool:
@@ -194,10 +129,6 @@ def report_telemetry(payload: dict[str, Any]) -> dict | None:
             Optional: ``endTimestamp``, ``mcpTool``, ``cliCommand``,
             ``eventTag``, ``skillName``, ``toolRequestId``, ``errorMessage``,
             ``pluginName``, ``mcpSessionId`` and token counters.
-            Set ``ALIBABACLOUD_TELEMETRY_ENDPOINT`` to override the signed
-            OpenAPI endpoint, for example the pre-release endpoint. Set
-            ``ALIBABACLOUD_TELEMETRY_REPORT_URL`` only to POST directly to a
-            local/dev report endpoint instead of using OpenAPI signing.
             Required-field validation is enforced server-side.
 
     Returns:
@@ -207,20 +138,15 @@ def report_telemetry(payload: dict[str, Any]) -> dict | None:
     if not _validate_payload(payload):
         return None
 
-    local_url = _local_report_url()
-    client = None if local_url else _get_client()
-    params = None if local_url else _build_params()
-    request = None if local_url else _build_request(payload)
-    runtime = None if local_url else _build_runtime()
+    client = _get_client()
+    params = _build_params()
+    request = _build_request(payload)
+    runtime = _build_runtime()
 
     last_failure: str | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = (
-                _post_local_report(local_url, payload)
-                if local_url
-                else client.call_api(params, request, runtime)
-            )
+            response = client.call_api(params, request, runtime)
             ok, reason = _evaluate_response(response)
             if ok:
                 return response
@@ -252,20 +178,15 @@ async def report_telemetry_async(payload: dict[str, Any]) -> dict | None:
     if not _validate_payload(payload):
         return None
 
-    local_url = _local_report_url()
-    client = None if local_url else _get_client()
-    params = None if local_url else _build_params()
-    request = None if local_url else _build_request(payload)
-    runtime = None if local_url else _build_runtime()
+    client = _get_client()
+    params = _build_params()
+    request = _build_request(payload)
+    runtime = _build_runtime()
 
     last_failure: str | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            response = (
-                await asyncio.to_thread(_post_local_report, local_url, payload)
-                if local_url
-                else await client.call_api_async(params, request, runtime)
-            )
+            response = await client.call_api_async(params, request, runtime)
             ok, reason = _evaluate_response(response)
             if ok:
                 return response

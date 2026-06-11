@@ -16,6 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 from pydantic import AnyUrl
 
 from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+from alibabacloud.mcp_proxy.session_marker import write_mcp_session_marker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -147,8 +148,10 @@ async def _streamable_http_background_worker(
                 http_client=http_client,
                 terminate_on_close=False,
             ) as streams:
+                get_session_id = streams[2]
                 async with ClientSession(streams[0], streams[1]) as session:
                     await session.initialize()
+                    write_mcp_session_marker(get_session_id())
                     ready_event.set()
 
                     async with request_receiver:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
+import urllib.error
 
 import pytest
 
@@ -11,6 +12,9 @@ from alibabacloud.mcp_proxy.telemetry import report_telemetry, report_telemetry_
 @pytest.fixture(autouse=True)
 def _no_backoff(monkeypatch):
     monkeypatch.setattr(report_mod, "_RETRY_BACKOFF_S", (0, 0, 0))
+    monkeypatch.delenv(report_mod.LOCAL_REPORT_URL_ENV, raising=False)
+    monkeypatch.delenv(report_mod.ENDPOINT_ENV, raising=False)
+    report_mod._client_singleton = None
 
 
 @pytest.fixture
@@ -18,6 +22,20 @@ def mock_client(monkeypatch):
     client = MagicMock()
     monkeypatch.setattr(report_mod, "_get_client", lambda: client)
     return client
+
+
+def test_endpoint_defaults_to_production(monkeypatch) -> None:
+    monkeypatch.delenv(report_mod.ENDPOINT_ENV, raising=False)
+    assert report_mod._endpoint() == report_mod.ENDPOINT
+
+
+def test_endpoint_can_be_overridden_for_pre(monkeypatch) -> None:
+    monkeypatch.setenv(
+        report_mod.ENDPOINT_ENV,
+        "https://openapi-mcp-pre.cn-hangzhou.aliyuncs.com/reportTelemetry",
+    )
+    assert report_mod._endpoint() == "openapi-mcp-pre.cn-hangzhou.aliyuncs.com"
+
 
 
 def test_sync_returns_response_on_success(mock_client) -> None:
@@ -49,6 +67,56 @@ def test_sync_retries_on_exception_then_succeeds(mock_client) -> None:
     assert mock_client.call_api.call_count == 2
 
 
+def test_sync_uses_local_report_url_when_env_is_set(monkeypatch, mock_client) -> None:
+    calls = []
+
+    def fake_post(url, payload):
+        calls.append((url, payload))
+        return {"statusCode": 200, "body": {"success": True, "requestId": "local-r1"}}
+
+    monkeypatch.setenv(report_mod.LOCAL_REPORT_URL_ENV, "http://localhost:8080/reportTelemetry")
+    monkeypatch.setattr(report_mod, "_post_local_report", fake_post)
+
+    payload = {"clientName": "cli", "eventType": "mcp_tool_use"}
+    result = report_telemetry(payload)
+
+    assert result == {"statusCode": 200, "body": {"success": True, "requestId": "local-r1"}}
+    assert calls == [("http://localhost:8080/reportTelemetry", payload)]
+    mock_client.call_api.assert_not_called()
+
+
+def test_local_report_http_error_keeps_response_body(monkeypatch) -> None:
+    class FakeHeaders:
+        def items(self):
+            return [("Content-Type", "application/json")]
+
+    class FakeHttpError(urllib.error.HTTPError):
+        def read(self):
+            return b'{"success":false,"message":"missing required field: sessionId"}'
+
+    def fake_urlopen(*_args, **_kwargs):
+        raise FakeHttpError(
+            "http://localhost:7001/reportTelemetry",
+            400,
+            "Bad Request",
+            FakeHeaders(),
+            None,
+        )
+
+    monkeypatch.setattr(report_mod.urllib.request, "urlopen", fake_urlopen)
+
+    result = report_mod._post_local_report(
+        "http://localhost:7001/reportTelemetry",
+        {"clientName": "cli"},
+    )
+
+    assert result == {
+        "statusCode": 400,
+        "headers": {"Content-Type": "application/json"},
+        "body": {"success": False, "message": "missing required field: sessionId"},
+    }
+
+
 def test_sync_returns_none_after_max_attempts(mock_client) -> None:
     mock_client.call_api.side_effect = TimeoutError("nope")
     result = report_telemetry({"clientName": "cli"})
@@ -76,6 +144,24 @@ async def test_async_returns_response_on_success(mock_client) -> None:
     result = await report_telemetry_async({"clientName": "cli"})
     assert result is not None
     assert result["statusCode"] == 200
+
+
+async def test_async_uses_local_report_url_when_env_is_set(monkeypatch, mock_client) -> None:
+    calls = []
+
+    def fake_post(url, payload):
+        calls.append((url, payload))
+        return {"statusCode": 200, "body": {"success": True, "requestId": "local-r2"}}
+
+    monkeypatch.setenv(report_mod.LOCAL_REPORT_URL_ENV, "http://localhost:8080/reportTelemetry")
+    monkeypatch.setattr(report_mod, "_post_local_report", fake_post)
+
+    payload = {"clientName": "cli", "eventType": "llm_call"}
+    result = await report_telemetry_async(payload)
+
+    assert result == {"statusCode": 200, "body": {"success": True, "requestId": "local-r2"}}
+    assert calls == [("http://localhost:8080/reportTelemetry", payload)]
+    mock_client.call_api_async.assert_not_called()
 
 
 async def test_async_retries_then_gives_up(mock_client) -> None:

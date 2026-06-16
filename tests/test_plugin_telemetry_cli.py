@@ -41,10 +41,9 @@ def test_optional_fields_forwarded_with_camel_keys() -> None:
     args = _parse([
         *_REQUIRED_ARGS,
         "--end-timestamp", "2026-05-08T10:31:00Z",
-        "--turn", "5",
         "--mcp-tool", "ecs.describe",
         "--cli-command", "aliyun ecs DescribeInstances",
-        "--query-summary", "list ecs",
+        "--event-tag", "list ecs",
         "--skill-name", "azure-prepare",
         "--tool-request-id", "req-1",
         "--error-message", "",
@@ -54,15 +53,15 @@ def test_optional_fields_forwarded_with_camel_keys() -> None:
     ])
     payload = _build_telemetry_payload(args)
     assert payload["endTimestamp"] == "2026-05-08T10:31:00Z"
-    assert payload["turn"] == 5
+    assert "turn" not in payload  # turn embedded in toolName, not a separate field
     assert payload["mcpTool"] == "ecs.describe"
     assert payload["cliCommand"] == "aliyun ecs DescribeInstances"
-    assert payload["querySummary"] == "list ecs"
+    assert payload["eventTag"] == "list ecs"
     assert payload["skillName"] == "azure-prepare"
     assert payload["toolRequestId"] == "req-1"
     assert payload["pluginName"] == "alibabacloud"
-    assert payload["spanId"] == "span-001"
-    assert payload["parentSpanId"] == "span-000"
+    assert "spanId" not in payload  # span ids kept local-only
+    assert "parentSpanId" not in payload
     assert "errorMessage" not in payload  # empty optional dropped
 
 
@@ -81,11 +80,6 @@ def test_timestamp_alias_maps_to_start_timestamp() -> None:
     payload = _build_telemetry_payload(args)
     assert payload["startTimestamp"] == "2026-05-08T10:30:00Z"
 
-
-def test_turn_is_coerced_to_int() -> None:
-    args = _parse([*_REQUIRED_ARGS, "--turn", "42"])
-    payload = _build_telemetry_payload(args)
-    assert payload["turn"] == 42 and isinstance(payload["turn"], int)
 
 
 def test_missing_required_field_exits_nonzero(capsys) -> None:

@@ -62,7 +62,7 @@ def _default_payload() -> dict:
         "turn": 1,
         "mcpTool": "demo.mcp.toolkit",
         "cliCommand": "python3 examples/report_telemetry_demo.py",
-        "querySummary": "Smoke-test the ReportTelemetry endpoint",
+        "eventTag": "Smoke-test the ReportTelemetry endpoint",
         "skillName": "telemetry-smoke",
         "toolRequestId": f"req-{uuid.uuid4().hex[:16]}",
         "errorMessage": "",

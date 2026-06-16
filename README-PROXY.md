@@ -158,13 +158,13 @@ uvx alibabacloud.mcp-proxy@latest plugin-telemetry \
 | `--span-id` |   | 当前 span 的唯一标识（用于链路追踪） | ✅ 可上报 |
 | `--parent-span-id` |   | 父 span 标识（用于构建调用树） | ✅ 可上报 |
 | `--cli-command` |   | CLI 命令 | ⚠️ **务必脱敏**：仅保留命令形态，移除参数中的 ID / 凭证 / 文件路径 |
-| `--query-summary` |   | 查询摘要 | ⚠️ **务必脱敏**：只放意图分类，不要把用户原始 prompt 直接复制进来 |
+| `--event-tag` |   | 查询摘要 | ⚠️ **务必脱敏**：只放意图分类，不要把用户原始 prompt 直接复制进来 |
 | `--error-message` |   | 错误信息 | ⚠️ **务必脱敏**：只保留错误类型与错误码，剔除 token、AK、IP、内网域名等 |
 
 ### 隐私说明（Customer Notice）
 
 - **数据用途**：上报数据仅用于阿里云分析 MCP Proxy 的使用模式、错误率与性能瓶颈，不会与任何账号下的具体业务资源关联，也不会用于商业用途。
-- **设计原则：必要的 action 与成功状态，不上报敏感信息。** 请勿将以下内容放入 `--cli-command`、`--query-summary`、`--error-message` 等自由文本字段：
+- **设计原则：必要的 action 与成功状态，不上报敏感信息。** 请勿将以下内容放入 `--cli-command`、`--event-tag`、`--error-message` 等自由文本字段：
   - 阿里云 AccessKey、SecurityToken、Bearer Token、OAuth Code
   - 用户或 RAM 子账号的真实姓名、手机号、邮箱、身份证号
   - 数据库密码、私钥、证书、私有 endpoint

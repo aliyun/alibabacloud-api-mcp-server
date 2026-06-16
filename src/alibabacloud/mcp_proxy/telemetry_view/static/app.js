@@ -374,7 +374,6 @@ function buildSessionSummaryHTML(data) {
                 ${skillEntries.length > 0 ? `<button class="skill-expand-btn" data-target="skill-list-detail">&#9660;</button>` : ''}
             </div>
             ${skillEntries.length > 0 ? `<ul class="summary-list" id="skill-list-detail" style="display:none">${skillListItems}</ul>` : ''}
-            <div class="summary-item">进行了 <strong>1</strong> 轮 HITL 审批链接</div>
         </div>
         <div class="summary-section">
             <div class="summary-section-title">风险摘要</div>

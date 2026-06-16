@@ -11,6 +11,7 @@ from alibabacloud.mcp_proxy.telemetry import report_telemetry, report_telemetry_
 @pytest.fixture(autouse=True)
 def _no_backoff(monkeypatch):
     monkeypatch.setattr(report_mod, "_RETRY_BACKOFF_S", (0, 0, 0))
+    report_mod._client_singleton = None
 
 
 @pytest.fixture

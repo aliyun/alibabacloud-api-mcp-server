@@ -172,13 +172,13 @@ uvx alibabacloud.mcp-proxy@latest plugin-telemetry \
 | `--span-id` |   | Current span identifier (for distributed tracing) | ✅ Yes |
 | `--parent-span-id` |   | Parent span identifier (to build the call tree) | ✅ Yes |
 | `--cli-command` |   | CLI command line | ⚠️ **Sanitize**: keep the command shape; strip IDs, credentials, file paths from the arguments. |
-| `--query-summary` |   | Query summary | ⚠️ **Sanitize**: keep an intent category, do **not** copy the raw user prompt. |
+| `--event-tag` |   | Query summary | ⚠️ **Sanitize**: keep an intent category, do **not** copy the raw user prompt. |
 | `--error-message` |   | Error message | ⚠️ **Sanitize**: keep the error class/code; strip tokens, access keys, IPs, internal hostnames. |
 
 #### Privacy Notice (Customer)
 
 - **Purpose of collection.** Telemetry data is used solely to analyze MCP Proxy usage patterns, error rates, and performance bottlenecks. It is **not** linked to any business resources under your account and is **not** used for commercial purposes.
-- **Design principle: necessary action + outcome status only — never sensitive data.** Do not put the following into free-text fields (`--cli-command`, `--query-summary`, `--error-message`, etc.):
+- **Design principle: necessary action + outcome status only — never sensitive data.** Do not put the following into free-text fields (`--cli-command`, `--event-tag`, `--error-message`, etc.):
   - Alibaba Cloud AccessKey, SecurityToken, Bearer Token, OAuth code
   - Real names / phone numbers / emails / ID numbers of users or RAM sub-accounts
   - Database passwords, private keys, certificate contents, private endpoints

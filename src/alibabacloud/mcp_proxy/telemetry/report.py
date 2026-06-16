@@ -126,9 +126,9 @@ def report_telemetry(payload: dict[str, Any]) -> dict | None:
         payload: Telemetry fields as defined in the backend schema.
             Required: ``clientName``, ``eventType``, ``startTimestamp``,
             ``toolName``, ``sessionId``, ``status``.
-            Optional: ``endTimestamp``, ``turn`` (int32), ``mcpTool``,
-            ``cliCommand``, ``querySummary``, ``skillName``, ``toolRequestId``,
-            ``errorMessage``, ``pluginName``.
+            Optional: ``endTimestamp``, ``mcpTool``, ``cliCommand``,
+            ``eventTag``, ``skillName``, ``toolRequestId``, ``errorMessage``,
+            ``pluginName``, ``mcpSessionId`` and token counters.
             Required-field validation is enforced server-side.
 
     Returns:

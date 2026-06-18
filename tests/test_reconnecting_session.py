@@ -96,3 +96,41 @@ async def test_reconnecting_session_reuses_live_connection() -> None:
 
     assert connection_factory.tokens == ["stable-token"]
     assert len(connection_factory.connections) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconnecting_session_applies_tool_policy_without_safety_policy(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str | None, tuple[str, ...]]] = []
+
+    async def fake_apply_safety_policy(
+        bearer_token: str,
+        safety_policy: str | None,
+        *,
+        allowed_tools: tuple[str, ...] = (),
+    ) -> None:
+        calls.append((bearer_token, safety_policy, tuple(allowed_tools)))
+
+    monkeypatch.setattr(
+        "alibabacloud.mcp_proxy.session.reconnecting_session.apply_safety_policy",
+        fake_apply_safety_policy,
+    )
+    token_provider = FakeTokenProvider(["stable-token"])
+    connection_factory = FakeConnectionFactory(fail_first_connection=False)
+    session = ReconnectingSession(
+        connection_factory,
+        token_provider,
+        RetrySettings(max_attempts=1, base_delay_seconds=0.01, max_delay_seconds=0.01),
+        allowed_tools=("AlibabaCloud___RunScript", "AlibabaCloud___GetTask"),
+    )
+
+    await session.list_tools()
+
+    assert calls == [
+        (
+            "stable-token",
+            None,
+            ("AlibabaCloud___RunScript", "AlibabaCloud___GetTask"),
+        )
+    ]

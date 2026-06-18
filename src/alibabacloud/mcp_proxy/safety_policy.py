@@ -7,7 +7,9 @@ to invoke.  The API is anonymous (no AK/SK required) and must be called
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Sequence
 
 from alibabacloud_tea_openapi.client import Client as OpenApiClient
 from alibabacloud_tea_openapi import models as open_api_models
@@ -19,6 +21,7 @@ _SAFETY_POLICY_ENDPOINT = "openapi-mcp.cn-hangzhou.aliyuncs.com"
 _SAFETY_POLICY_ACTION = "UpdateBearerTokenSafetyPolicy"
 _SAFETY_POLICY_VERSION = "2024-11-30"
 _SAFETY_POLICY_PATHNAME = "/safePolicy/set"
+_EMPTY_SAFE_POLICY = '{"rules":[]}'
 
 
 def _create_anonymous_client() -> OpenApiClient:
@@ -43,8 +46,22 @@ def _create_params() -> open_api_models.Params:
     )
 
 
-async def apply_safety_policy(bearer_token: str, safety_policy: str) -> None:
-    """Set a safety policy on the given bearer token.
+def _build_tool_policy(allowed_tools: Sequence[str] | None) -> str | None:
+    if not allowed_tools:
+        return None
+    return json.dumps(
+        {"allowedTools": list(allowed_tools)},
+        separators=(",", ":"),
+    )
+
+
+async def apply_safety_policy(
+    bearer_token: str,
+    safety_policy: str | None,
+    *,
+    allowed_tools: Sequence[str] | None = None,
+) -> None:
+    """Set safety/tool policies on the given bearer token.
 
     This calls the ``UpdateBearerTokenSafetyPolicy`` API anonymously.
     Must be invoked **before** connecting to the upstream MCP server so
@@ -63,8 +80,12 @@ async def apply_safety_policy(bearer_token: str, safety_policy: str) -> None:
 
     body = {
         "bearerToken": bearer_token,
-        "safePolicy": safety_policy,
+        "safePolicy": safety_policy or _EMPTY_SAFE_POLICY,
     }
+    tool_policy = _build_tool_policy(allowed_tools)
+    if tool_policy is not None:
+        body["toolPolicy"] = tool_policy
+
     runtime = util_models.RuntimeOptions()
     request = open_api_models.OpenApiRequest(body=body)
 

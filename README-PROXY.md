@@ -105,6 +105,30 @@ export ALIBABACLOUD_MCP_SAFETY_POLICY="ecs:describe-*=allow,*=deny"
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+## Tool 白名单
+
+可以通过 `--allow-tools` 指定本次代理进程允许暴露和调用的 MCP tool。该限制会作为 `toolPolicy` 写入 Bearer Token，对上游 MCP Server 生效。
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --allow-tools AlibabaCloud___RunScript,AlibabaCloud___GetTask
+```
+
+也可以多次传参：
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --allow-tools AlibabaCloud___RunScript \
+  --allow-tools AlibabaCloud___GetTask
+```
+
+使用环境变量：
+
+```bash
+export ALIBABACLOUD_MCP_ALLOW_TOOLS="AlibabaCloud___RunScript,AlibabaCloud___GetTask"
+uvx alibabacloud.mcp-proxy@latest
+```
+
 ## 预检查（可选）
 
 当使用默认的 Client ID 时，无需单独执行预检查，代理会自动完成认证流程。
@@ -233,6 +257,7 @@ uvx alibabacloud.mcp-proxy@latest telemetry-view
 |---|---|---|---|
 | `--bearer-token` | `ALIBABACLOUD_MCP_BEARER_TOKEN` | - | 显式指定上游 MCP Server 的 Bearer Token。 |
 | `--token-command` | `ALIBABACLOUD_MCP_TOKEN_COMMAND` | - | 输出 Bearer Token 或包含 `access_token` 的 JSON 的命令。 |
+| `--allow-tools` | `ALIBABACLOUD_MCP_ALLOW_TOOLS` | - | 允许暴露和调用的 MCP tool 名称列表，支持逗号分隔或多次传参。 |
 | `--client-id` | `ALIBABACLOUD_MCP_CLIENT_ID` | 按站点选择 | IMS `GenerateAccessToken` ClientId。 |
 | `--scope` | `ALIBABACLOUD_MCP_SCOPE` | `/internal/acs/openapi` | IMS `GenerateAccessToken` Scope。 |
 | `--ims-endpoint` | `ALIBABACLOUD_MCP_IMS_ENDPOINT` | 按站点选择 | IMS API Endpoint。 |

@@ -67,6 +67,21 @@ def _parse_int(raw: str | None, *, default: int, field_name: str) -> int:
     return value
 
 
+def _parse_csv(raw: str | None) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(","):
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        values.append(value)
+        seen.add(value)
+    return tuple(values)
+
+
 @dataclass(slots=True, frozen=True)
 class RetrySettings:
     max_attempts: int = 3
@@ -83,6 +98,7 @@ class TokenSettings:
     ims_endpoint: str
     refresh_skew_seconds: int = 60
     safety_policy: str | None = None
+    allowed_tools: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -158,6 +174,7 @@ class AlibabaCloudProxyConfig:
                     field_name="refresh skew",
                 ),
                 safety_policy=(merged.get("safety_policy") or "").strip() or None,
+                allowed_tools=_parse_csv(merged.get("allowed_tools")),
             ),
             retry=RetrySettings(
                 max_attempts=_parse_int(
@@ -198,6 +215,7 @@ class AlibabaCloudProxyConfig:
             "ims_endpoint": _env("ALIBABACLOUD_MCP_IMS_ENDPOINT"),
             "refresh_skew_seconds": _env("ALIBABACLOUD_MCP_REFRESH_SKEW_SECONDS"),
             "safety_policy": _env("ALIBABACLOUD_MCP_SAFETY_POLICY"),
+            "allowed_tools": _env("ALIBABACLOUD_MCP_ALLOW_TOOLS"),
             "max_attempts": _env("ALIBABACLOUD_MCP_RETRY_MAX_ATTEMPTS"),
             "base_delay_seconds": _env("ALIBABACLOUD_MCP_RETRY_BASE_SECONDS"),
             "max_delay_seconds": _env("ALIBABACLOUD_MCP_RETRY_MAX_SECONDS"),

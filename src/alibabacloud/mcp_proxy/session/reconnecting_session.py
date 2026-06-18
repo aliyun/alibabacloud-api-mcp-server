@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Any, Awaitable, Callable, Protocol, TypeVar
 
 import anyio
@@ -67,11 +68,13 @@ class ReconnectingSession:
         retry_settings: RetrySettings,
         *,
         safety_policy: str | None = None,
+        allowed_tools: Sequence[str] | None = None,
     ) -> None:
         self._connection_factory = connection_factory
         self._token_provider = token_provider
         self._retry_settings = retry_settings
         self._safety_policy = safety_policy
+        self._allowed_tools = tuple(allowed_tools or ())
         self._connection: UpstreamConnection | None = None
         self._policy_applied_for_token: str | None = None
         self._lock = anyio.Lock()
@@ -176,7 +179,7 @@ class ReconnectingSession:
         The policy is re-applied whenever the token changes (e.g. after a
         refresh) or when connecting for the first time.
         """
-        if not self._safety_policy:
+        if not self._safety_policy and not self._allowed_tools:
             return
 
         if self._policy_applied_for_token == bearer_token:
@@ -185,7 +188,11 @@ class ReconnectingSession:
 
         LOGGER.debug("Setting safety policy before upstream connection...")
         try:
-            await apply_safety_policy(bearer_token, self._safety_policy)
+            await apply_safety_policy(
+                bearer_token,
+                self._safety_policy,
+                allowed_tools=self._allowed_tools,
+            )
             self._policy_applied_for_token = bearer_token
             LOGGER.debug("Safety policy set successfully.")
         except Exception as exc:

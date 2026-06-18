@@ -37,6 +37,22 @@ def test_parse_config_uses_cli_values() -> None:
     assert config.retry.max_attempts == 5
 
 
+def test_parse_config_allow_tools_supports_commas_and_repeated_flags() -> None:
+    config = parse_config(
+        [
+            "--allow-tools",
+            "AlibabaCloud___RunScript,AlibabaCloud___GetTask",
+            "--allow-tools",
+            "AlibabaCloud___RunScript",
+        ]
+    )
+
+    assert config.token.allowed_tools == (
+        "AlibabaCloud___RunScript",
+        "AlibabaCloud___GetTask",
+    )
+
+
 def test_parse_config_falls_back_to_env(monkeypatch) -> None:
     monkeypatch.setenv("ALIBABACLOUD_MCP_SERVER_URL", "https://env.example/mcp")
 

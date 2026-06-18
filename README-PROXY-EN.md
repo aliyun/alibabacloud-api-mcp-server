@@ -113,6 +113,30 @@ export ALIBABACLOUD_MCP_SAFETY_POLICY="ecs:describe-*=allow,*=deny"
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+### Tool Allowlist
+
+Use `--allow-tools` to restrict which MCP tools this proxy process can expose and call. The proxy writes this restriction to the bearer token as `toolPolicy`, so it is enforced by the upstream MCP server.
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --allow-tools AlibabaCloud___RunScript,AlibabaCloud___GetTask
+```
+
+You can also pass the flag multiple times:
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --allow-tools AlibabaCloud___RunScript \
+  --allow-tools AlibabaCloud___GetTask
+```
+
+Environment variable:
+
+```bash
+export ALIBABACLOUD_MCP_ALLOW_TOOLS="AlibabaCloud___RunScript,AlibabaCloud___GetTask"
+uvx alibabacloud.mcp-proxy@latest
+```
+
 ### Pre-check (Optional)
 
 When using the default Client ID, there is no need to run a separate pre-check — the proxy handles authentication automatically.
@@ -247,6 +271,7 @@ Every CLI flag has a corresponding environment variable. **CLI flags take preced
 |---|---|---|---|
 | `--bearer-token` | `ALIBABACLOUD_MCP_BEARER_TOKEN` | — | Explicit bearer token for the upstream MCP server. |
 | `--token-command` | `ALIBABACLOUD_MCP_TOKEN_COMMAND` | — | Shell command that prints a bearer token or JSON with `access_token`. |
+| `--allow-tools` | `ALIBABACLOUD_MCP_ALLOW_TOOLS` | — | MCP tool names allowed for this proxy process. Supports comma-separated names and repeated flags. |
 | `--client-id` | `ALIBABACLOUD_MCP_CLIENT_ID` | *(per site type)* | IMS `GenerateAccessToken` ClientId. Defaults to `4071151845732613353` (CN) or `4195410055503316452` (INTL). |
 | `--scope` | `ALIBABACLOUD_MCP_SCOPE` | `/internal/acs/openapi` | IMS `GenerateAccessToken` Scope. |
 | `--ims-endpoint` | `ALIBABACLOUD_MCP_IMS_ENDPOINT` | `ramoauth.aliyuncs.com` (CN) / `ramoauth.alibabacloudcs.com` (INTL) | IMS API endpoint hostname. Auto-selected based on `--site-type`. |

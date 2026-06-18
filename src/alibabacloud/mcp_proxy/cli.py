@@ -96,6 +96,15 @@ def _add_proxy_arguments(parser: argparse.ArgumentParser) -> None:
     """Add all proxy-related CLI arguments to *parser*."""
     parser.add_argument("--server-url", help="Upstream Alibaba Cloud MCP streamable HTTP URL.")
     parser.add_argument(
+        "--allow-tools",
+        dest="allow_tools",
+        action="append",
+        help=(
+            "Only allow the specified MCP tools for this proxy run. "
+            "Accepts comma-separated names and may be provided multiple times."
+        ),
+    )
+    parser.add_argument(
         "--site-type",
         dest="site_type",
         choices=["CN", "INTL"],
@@ -320,6 +329,7 @@ def parse_config(
         "max_attempts": _stringify(args.max_attempts),
         "base_delay_seconds": _stringify(args.base_delay_seconds),
         "max_delay_seconds": _stringify(args.max_delay_seconds),
+        "allowed_tools": _stringify_csv(args.allow_tools),
     }
     return AlibabaCloudProxyConfig.from_mapping(
         values,
@@ -356,6 +366,7 @@ async def run_proxy(config: AlibabaCloudProxyConfig) -> None:
             token_provider,
             config.retry,
             safety_policy=config.token.safety_policy,
+            allowed_tools=config.token.allowed_tools,
         )
         proxy = AlibabaCloudMcpProxyServer(config, session)
         try:
@@ -512,3 +523,11 @@ def _stringify(value: object) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _stringify_csv(values: object) -> str | None:
+    if values is None:
+        return None
+    if isinstance(values, (list, tuple)):
+        return ",".join(str(value) for value in values)
+    return str(values)

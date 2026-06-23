@@ -271,7 +271,7 @@ uvx alibabacloud.mcp-proxy@latest telemetry-view
 
 ## 运行要求
 
-- Python >= 3.13
+- Python >= 3.10
 
 ## License
 

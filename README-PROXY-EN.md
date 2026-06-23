@@ -312,7 +312,7 @@ Every CLI flag has a corresponding environment variable. **CLI flags take preced
 
 ### Requirements
 
-- Python >= 3.13
+- Python >= 3.10
 
 ### License
 

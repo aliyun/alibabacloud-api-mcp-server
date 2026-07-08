@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from os import environ
 
 UTC = timezone.utc
 from typing import Protocol
 
 import anyio
+from alibabacloud_credentials.client import Client as CredentialClient
+from alibabacloud_credentials.models import Config as CredentialConfig
+from alibabacloud_credentials.utils import auth_constant as credential_types
 
 from alibabacloud.mcp_proxy.auth.ims_access_token import ImsBearerTokenSource
 from alibabacloud.mcp_proxy.config import TokenSettings
+
+LOGGER = logging.getLogger(__name__)
 
 
 class TokenAcquisitionError(RuntimeError):
@@ -101,6 +108,44 @@ class CachedBearerTokenProvider:
             return self._cached_token.value
 
 
+def _build_explicit_static_credential_client_from_env() -> CredentialClient | None:
+    access_key_id = (environ.get("ALIBABA_CLOUD_ACCESS_KEY_ID") or "").strip()
+    access_key_secret = (environ.get("ALIBABA_CLOUD_ACCESS_KEY_SECRET") or "").strip()
+    security_token = (environ.get("ALIBABA_CLOUD_SECURITY_TOKEN") or "").strip()
+
+    if not access_key_id and not access_key_secret and not security_token:
+        return None
+
+    if not access_key_id:
+        raise TokenAcquisitionError(
+            "ALIBABA_CLOUD_ACCESS_KEY_ID is required when configuring static Alibaba Cloud credentials."
+        )
+    if not access_key_secret:
+        raise TokenAcquisitionError(
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET is required when configuring static Alibaba Cloud credentials."
+        )
+
+    if security_token:
+        LOGGER.debug("Using explicit static STS credential from environment.")
+        return CredentialClient(
+            CredentialConfig(
+                type=credential_types.STS,
+                access_key_id=access_key_id,
+                access_key_secret=access_key_secret,
+                security_token=security_token,
+            )
+        )
+
+    LOGGER.debug("Using explicit static AK credential from environment.")
+    return CredentialClient(
+        CredentialConfig(
+            type=credential_types.ACCESS_KEY,
+            access_key_id=access_key_id,
+            access_key_secret=access_key_secret,
+        )
+    )
+
+
 def build_token_provider(settings: TokenSettings) -> CachedBearerTokenProvider:
     if settings.bearer_token:
         source: BearerTokenSource = StaticBearerTokenSource(settings.bearer_token)
@@ -111,6 +156,7 @@ def build_token_provider(settings: TokenSettings) -> CachedBearerTokenProvider:
             client_id=settings.ims_client_id,
             scope=settings.ims_scope,
             endpoint=settings.ims_endpoint,
+            credential_client=_build_explicit_static_credential_client_from_env(),
         )
 
     return CachedBearerTokenProvider(source, refresh_skew_seconds=settings.refresh_skew_seconds)

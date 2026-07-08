@@ -76,9 +76,14 @@ def _log_ims_generate_access_token_response(response: Any) -> None:
             response,
         )
     try:
-        _LOGGER.debug("IMS GenerateAccessToken raw response: %s", _response_to_json_text(response))
+        _LOGGER.debug(
+            "IMS GenerateAccessToken debug response (tokens redacted): %s",
+            _response_to_json_text(_redact_sensitive_for_log(response)),
+        )
     except (TypeError, ValueError):
-        _LOGGER.debug("IMS GenerateAccessToken raw response (repr): %r", response)
+        _LOGGER.debug(
+            "IMS GenerateAccessToken debug response could not be serialized safely."
+        )
 
 
 def get_default_credential_client() -> CredentialClient:
@@ -310,13 +315,18 @@ async def generate_access_token_async(
 
     cred = credential_client or get_default_credential_client()
     try:
-        cred.get_credential()
+        loaded_credential = cred.get_credential()
     except CredentialException as exc:
         raise TokenAcquisitionError(
             "Could not load Alibaba Cloud credentials from the default chain. "
             "Configure environment variables, ~/.aliyun/config.json, or instance role. "
             f"Details: {exc}"
         ) from exc
+    provider_name = getattr(loaded_credential, "provider_name", None) or "unknown"
+    _LOGGER.debug(
+        "Using Alibaba Cloud credential provider for IMS token acquisition: %s",
+        provider_name,
+    )
 
     config = Config(credential=cred, signature_algorithm="v2")
     config.endpoint = endpoint
@@ -353,6 +363,10 @@ async def generate_access_token_async(
     _log_ims_generate_access_token_response(response)
 
     token_value, expires_at = extract_token_from_ims_api_response(response)
+    if expires_at is not None:
+        _LOGGER.debug("IMS Bearer token acquired; expires_at=%s", expires_at.isoformat())
+    else:
+        _LOGGER.debug("IMS Bearer token acquired without an expiry timestamp.")
     return BearerToken(value=token_value, expires_at=expires_at)
 
 

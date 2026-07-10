@@ -42,10 +42,33 @@ class _RpcRequest:
         self.error = exc
         self.result_event.set()
 
-    async def wait(self) -> Any:
-        await self.result_event.wait()
+    async def wait(
+        self,
+        worker_done_event: anyio.Event,
+        worker_error_holder: list[BaseException],
+    ) -> Any:
+        wake_event = anyio.Event()
+
+        async def wake_when_set(event: anyio.Event) -> None:
+            await event.wait()
+            wake_event.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(wake_when_set, self.result_event)
+            task_group.start_soon(wake_when_set, worker_done_event)
+            await wake_event.wait()
+            task_group.cancel_scope.cancel()
+
         if self.error is not None:
+            if isinstance(self.error, anyio.get_cancelled_exc_class()):
+                await worker_done_event.wait()
+                if worker_error_holder:
+                    raise worker_error_holder[-1]
             raise self.error
+        if not self.result_event.is_set():
+            if worker_error_holder:
+                raise worker_error_holder[-1]
+            raise RuntimeError("Streamable HTTP background worker stopped unexpectedly.")
         return self.result
 
 
@@ -68,17 +91,25 @@ class StreamableHttpConnection:
         self,
         request_sender: anyio.abc.ObjectSendStream[_RpcRequest | None],
         done_event: anyio.Event,
+        worker_error_holder: list[BaseException],
     ) -> None:
         self._request_sender = request_sender
         self._done_event = done_event
+        self._worker_error_holder = worker_error_holder
 
     async def _dispatch(
         self,
         caller: Callable[[ClientSession], Awaitable[T]],
     ) -> T:
         request: _RpcRequest = _RpcRequest(caller)
-        await self._request_sender.send(request)
-        return await request.wait()
+        try:
+            await self._request_sender.send(request)
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await self._done_event.wait()
+            if self._worker_error_holder:
+                raise self._worker_error_holder[-1]
+            raise
+        return await request.wait(self._done_event, self._worker_error_holder)
 
     async def list_prompts(self) -> types.ListPromptsResult:
         return await self._dispatch(lambda s: s.list_prompts())
@@ -121,6 +152,7 @@ async def _streamable_http_background_worker(
     ready_event: anyio.Event,
     done_event: anyio.Event,
     startup_error_holder: list[BaseException],
+    worker_error_holder: list[BaseException],
 ) -> None:
     """Background task that owns the streamable_http_client context.
 
@@ -174,6 +206,7 @@ async def _streamable_http_background_worker(
             startup_error_holder.append(root_cause)
             ready_event.set()
         else:
+            worker_error_holder.append(root_cause)
             LOGGER.error(
                 "Streamable HTTP background worker crashed: %s",
                 root_cause,
@@ -220,6 +253,7 @@ class StreamableHttpConnectionFactory:
         ready_event = anyio.Event()
         done_event = anyio.Event()
         startup_error_holder: list[BaseException] = []
+        worker_error_holder: list[BaseException] = []
         headers = self._build_headers(bearer_token)
 
         self._task_group.start_soon(
@@ -231,6 +265,7 @@ class StreamableHttpConnectionFactory:
             ready_event,
             done_event,
             startup_error_holder,
+            worker_error_holder,
         )
 
         await ready_event.wait()
@@ -241,4 +276,5 @@ class StreamableHttpConnectionFactory:
         return StreamableHttpConnection(
             request_sender=request_sender,
             done_event=done_event,
+            worker_error_holder=worker_error_holder,
         )

@@ -185,7 +185,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/ab/98/d7111245f17935bf7
 
 [[package]]
 name = "alibabacloud-mcp-proxy"
-version = "0.2.10"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import anyio
+import httpx
 from anyio.abc import TaskGroup
 
 if sys.version_info < (3, 11):
@@ -19,6 +20,15 @@ from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
 LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+class LegacySseSessionExpiredError(httpx.HTTPStatusError):
+    """Raised when a legacy SSE message endpoint no longer knows its session."""
+
+
+def _is_legacy_session_not_found(response_body: str) -> bool:
+    normalized = response_body.lower()
+    return "session not found" in normalized or "session id not found" in normalized
 
 
 class _RpcRequest:
@@ -40,10 +50,33 @@ class _RpcRequest:
         self.error = exc
         self.result_event.set()
 
-    async def wait(self) -> Any:
-        await self.result_event.wait()
+    async def wait(
+        self,
+        worker_done_event: anyio.Event,
+        worker_error_holder: list[BaseException],
+    ) -> Any:
+        wake_event = anyio.Event()
+
+        async def wake_when_set(event: anyio.Event) -> None:
+            await event.wait()
+            wake_event.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(wake_when_set, self.result_event)
+            task_group.start_soon(wake_when_set, worker_done_event)
+            await wake_event.wait()
+            task_group.cancel_scope.cancel()
+
         if self.error is not None:
+            if isinstance(self.error, anyio.get_cancelled_exc_class()):
+                await worker_done_event.wait()
+                if worker_error_holder:
+                    raise worker_error_holder[-1]
             raise self.error
+        if not self.result_event.is_set():
+            if worker_error_holder:
+                raise worker_error_holder[-1]
+            raise RuntimeError("SSE background worker stopped unexpectedly.")
         return self.result
 
 
@@ -68,17 +101,25 @@ class SseConnection:
         self,
         request_sender: anyio.abc.ObjectSendStream[_RpcRequest | None],
         done_event: anyio.Event,
+        worker_error_holder: list[BaseException],
     ) -> None:
         self._request_sender = request_sender
         self._done_event = done_event
+        self._worker_error_holder = worker_error_holder
 
     async def _dispatch(
         self,
         caller: Callable[[ClientSession], Awaitable[T]],
     ) -> T:
         request: _RpcRequest = _RpcRequest(caller)
-        await self._request_sender.send(request)
-        return await request.wait()
+        try:
+            await self._request_sender.send(request)
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            await self._done_event.wait()
+            if self._worker_error_holder:
+                raise self._worker_error_holder[-1]
+            raise
+        return await request.wait(self._done_event, self._worker_error_holder)
 
     async def list_prompts(self) -> types.ListPromptsResult:
         return await self._dispatch(lambda s: s.list_prompts())
@@ -122,6 +163,7 @@ async def _sse_background_worker(
     ready_event: anyio.Event,
     done_event: anyio.Event,
     startup_error_holder: list[BaseException],
+    worker_error_holder: list[BaseException],
 ) -> None:
     """Background task that owns the sse_client context.
 
@@ -133,32 +175,67 @@ async def _sse_background_worker(
     propagate into the host ``TaskGroup`` (which would crash the entire
     proxy with ``"unhandled errors in a TaskGroup"``).
     """
+    transport_error_holder: list[BaseException] = []
     try:
-        async with sse_client(
-            server_url,
-            headers=headers,
-            timeout=config.connect_timeout_seconds,
-            sse_read_timeout=config.read_timeout_seconds,
-        ) as streams:
-            async with ClientSession(streams[0], streams[1]) as session:
-                await session.initialize()
-                # Signal that the session is ready.
-                ready_event.set()
+        with anyio.CancelScope() as worker_cancel_scope:
+            async def inspect_response(response: httpx.Response) -> None:
+                if response.request.method != "POST" or response.status_code != 404:
+                    return
 
-                async with request_receiver:
-                    async for request in request_receiver:
-                        if request is None:
-                            # Shutdown signal.
-                            break
-                        try:
-                            result = await request.caller(session)
-                            request.set_result(result)
-                        except BaseException as exc:
-                            request.set_error(exc)
+                await response.aread()
+                if not _is_legacy_session_not_found(response.text):
+                    return
+
+                error = LegacySseSessionExpiredError(
+                    f"Legacy SSE session expired (404): {response.text}",
+                    request=response.request,
+                    response=response,
+                )
+                transport_error_holder.append(error)
+                worker_cancel_scope.cancel()
+
+            def httpx_client_factory(
+                headers: dict[str, str] | None = None,
+                timeout: httpx.Timeout | None = None,
+                auth: httpx.Auth | None = None,
+            ) -> httpx.AsyncClient:
+                return httpx.AsyncClient(
+                    headers=headers,
+                    timeout=timeout,
+                    auth=auth,
+                    follow_redirects=True,
+                    event_hooks={"response": [inspect_response]},
+                )
+
+            async with sse_client(
+                server_url,
+                headers=headers,
+                timeout=config.connect_timeout_seconds,
+                sse_read_timeout=config.read_timeout_seconds,
+                httpx_client_factory=httpx_client_factory,
+            ) as streams:
+                async with ClientSession(streams[0], streams[1]) as session:
+                    await session.initialize()
+                    # Signal that the session is ready.
+                    ready_event.set()
+
+                    async with request_receiver:
+                        async for request in request_receiver:
+                            if request is None:
+                                # Shutdown signal.
+                                break
+                            try:
+                                result = await request.caller(session)
+                                request.set_result(result)
+                            except BaseException as exc:
+                                request.set_error(exc)
+
+        if transport_error_holder:
+            raise transport_error_holder[-1]
     except BaseException as exc:
         # Flatten ExceptionGroup for clearer logging.
-        root_cause = exc
-        if isinstance(exc, BaseExceptionGroup):
+        root_cause = transport_error_holder[-1] if transport_error_holder else exc
+        if not transport_error_holder and isinstance(exc, BaseExceptionGroup):
             exceptions = exc.exceptions
             if len(exceptions) == 1:
                 root_cause = exceptions[0]
@@ -167,6 +244,7 @@ async def _sse_background_worker(
             startup_error_holder.append(root_cause)
             ready_event.set()
         else:
+            worker_error_holder.append(root_cause)
             LOGGER.error("SSE background worker crashed: %s", root_cause, exc_info=True)
     finally:
         done_event.set()
@@ -214,6 +292,7 @@ class SseConnectionFactory:
         ready_event = anyio.Event()
         done_event = anyio.Event()
         startup_error_holder: list[BaseException] = []
+        worker_error_holder: list[BaseException] = []
         headers = self._build_headers(bearer_token)
 
         # Spawn the worker in the external task group so the sse_client's
@@ -227,6 +306,7 @@ class SseConnectionFactory:
             ready_event,
             done_event,
             startup_error_holder,
+            worker_error_holder,
         )
 
         # Wait for the SSE session to be ready (or fail).
@@ -238,4 +318,5 @@ class SseConnectionFactory:
         return SseConnection(
             request_sender=request_sender,
             done_event=done_event,
+            worker_error_holder=worker_error_holder,
         )

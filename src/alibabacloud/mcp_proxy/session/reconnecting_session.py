@@ -130,9 +130,9 @@ class ReconnectingSession:
             async with self._lock:
                 force_refresh = retry_state.attempt > 0 and _should_force_refresh(last_error)
                 token = await self._token_provider.get_token(force_refresh=force_refresh)
-                connection = await self._ensure_connection_locked(token)
 
                 try:
+                    connection = await self._ensure_connection_locked(token)
                     return await callback(connection)
                 except Exception as exc:  # pragma: no cover - depends on upstream SDK exceptions
                     last_error = exc

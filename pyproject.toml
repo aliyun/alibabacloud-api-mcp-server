@@ -1,6 +1,6 @@
 [project]
 name = "alibabacloud.mcp-proxy"
-version = "0.2.9"
+version = "0.2.10"
 description = "Local stdio MCP proxy for Alibaba Cloud OpenAPI MCP servers."
 readme = "README.md"
 license = "Apache-2.0"
@@ -35,6 +35,11 @@ Repository = "https://github.com/aliyun/alibabacloud-api-mcp-server"
 
 [project.scripts]
 "alibabacloud.mcp-proxy" = "alibabacloud.mcp_proxy.cli:main"
+
+# Compatibility shim: uv 0.8.4 on Windows incorrectly resolves
+# alibabacloud.mcp-proxy as alibabacloud.exe.
+# Do not remove until support for affected uv versions is dropped.
+"alibabacloud" = "alibabacloud.mcp_proxy.cli:main"
 
 [build-system]
 requires = ["hatchling"]

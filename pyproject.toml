@@ -37,9 +37,9 @@ Repository = "https://github.com/aliyun/alibabacloud-api-mcp-server"
 "alibabacloud.mcp-proxy" = "alibabacloud.mcp_proxy.cli:main"
 
 # Compatibility shim: uv 0.8.4 on Windows incorrectly resolves
-# alibabacloud.mcp-proxy.exe as alibabacloud.mcp.exe.
+# alibabacloud.mcp-proxy as alibabacloud.exe.
 # Do not remove until support for affected uv versions is dropped.
-"alibabacloud.mcp" = "alibabacloud.mcp_proxy.cli:main"
+"alibabacloud" = "alibabacloud.mcp_proxy.cli:main"
 
 [build-system]
 requires = ["hatchling"]

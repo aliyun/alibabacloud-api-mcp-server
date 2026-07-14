@@ -179,18 +179,30 @@ async def _sse_background_worker(
     try:
         with anyio.CancelScope() as worker_cancel_scope:
             async def inspect_response(response: httpx.Response) -> None:
-                if response.request.method != "POST" or response.status_code != 404:
+                if response.request.method != "POST":
                     return
 
-                await response.aread()
-                if not _is_legacy_session_not_found(response.text):
+                if response.status_code == 404:
+                    await response.aread()
+                    if not _is_legacy_session_not_found(response.text):
+                        return
+
+                    error = LegacySseSessionExpiredError(
+                        f"Legacy SSE session expired (404): {response.text}",
+                        request=response.request,
+                        response=response,
+                    )
+                elif 500 <= response.status_code < 600:
+                    await response.aread()
+                    error = httpx.HTTPStatusError(
+                        f"Legacy SSE POST failed ({response.status_code}): "
+                        f"{response.text}",
+                        request=response.request,
+                        response=response,
+                    )
+                else:
                     return
 
-                error = LegacySseSessionExpiredError(
-                    f"Legacy SSE session expired (404): {response.text}",
-                    request=response.request,
-                    response=response,
-                )
                 transport_error_holder.append(error)
                 worker_cancel_scope.cancel()
 

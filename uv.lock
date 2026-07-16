@@ -155,7 +155,7 @@ wheels = [
 
 [[package]]
 name = "alibabacloud-credentials"
-version = "1.0.8"
+version = "1.0.10"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -163,9 +163,9 @@ dependencies = [
     { name = "alibabacloud-tea" },
     { name = "apscheduler" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d2/15/2b01b4a6cbed4cc2c8a1c801efec43af945af22fd3ca5f78c932117fd4ce/alibabacloud_credentials-1.0.8.tar.gz", hash = "sha256:364c22abef2d240b259ceadf1ce6800017f19a336729553956928a1edd12e769", size = 40465, upload-time = "2026-03-11T09:13:59.398Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/23/7364a63aaf2fff2f3cb2d00ec606344665ab405c43e2997df2fc860e2c02/alibabacloud_credentials-1.0.10.tar.gz", hash = "sha256:ae66c4374914862959cbf096839e40cadf8f44c6f18ea44a5a3f1e71da63c428", size = 41753, upload-time = "2026-07-16T01:57:23.266Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/24/7c47501b24897a1379cd57cc8b8de376161f2487548fc8233b2b74ab25c7/alibabacloud_credentials-1.0.8-py3-none-any.whl", hash = "sha256:66677c3fa54aeb66cfb9cc97da4a787534f38a04d09bbfa0bc6c815fe1af7e28", size = 48799, upload-time = "2026-03-11T09:13:58.113Z" },
+    { url = "https://files.pythonhosted.org/packages/27/a8/ad3569db5a37bb347cf384a83eeed4ce720a705b5dc62841538b42013942/alibabacloud_credentials-1.0.10-py3-none-any.whl", hash = "sha256:7d6b4f041285852f2787cecdeded503502b1aa81a1e35d76b1f32cadce982c92", size = 50772, upload-time = "2026-07-16T01:57:22.068Z" },
 ]
 
 [[package]]
@@ -185,7 +185,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/ab/98/d7111245f17935bf7
 
 [[package]]
 name = "alibabacloud-mcp-proxy"
-version = "0.2.7"
+version = "0.2.11"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -207,7 +207,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
-    { name = "alibabacloud-credentials", specifier = ">=1.0.8" },
+    { name = "alibabacloud-credentials", specifier = ">=1.0.10" },
     { name = "alibabacloud-openapi-util", specifier = ">=0.2.4" },
     { name = "alibabacloud-tea-openapi", specifier = ">=0.4.4" },
     { name = "alibabacloud-tea-util", specifier = ">=0.3.14" },

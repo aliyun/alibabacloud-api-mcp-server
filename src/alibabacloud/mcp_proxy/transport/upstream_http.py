@@ -16,7 +16,9 @@ from mcp.client.streamable_http import streamable_http_client
 from pydantic import AnyUrl
 
 from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+from alibabacloud.mcp_proxy import __version__
 from alibabacloud.mcp_proxy.session_marker import write_mcp_session_marker
+from alibabacloud.mcp_proxy.transport.http_client import create_async_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -164,7 +166,7 @@ async def _streamable_http_background_worker(
     RPC calls until the connection is closed or an error occurs.
     """
     try:
-        http_client = httpx.AsyncClient(
+        http_client = create_async_client(
             headers=headers,
             timeout=httpx.Timeout(
                 connect=config.connect_timeout_seconds,
@@ -236,7 +238,7 @@ class StreamableHttpConnectionFactory:
     def _build_headers(self, bearer_token: str) -> dict[str, str]:
         return {
             "authorization": f"Bearer {bearer_token}",
-            "user-agent": "alibabacloud-mcp-proxy/0.1.0",
+            "user-agent": f"alibabacloud-mcp-proxy/{__version__}",
         }
 
     async def connect(self, *, bearer_token: str) -> StreamableHttpConnection:

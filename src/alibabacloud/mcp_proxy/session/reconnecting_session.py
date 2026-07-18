@@ -12,6 +12,7 @@ from pydantic import AnyUrl
 from alibabacloud.mcp_proxy.auth.token_provider import CachedBearerTokenProvider
 from alibabacloud.mcp_proxy.config import RetrySettings
 from alibabacloud.mcp_proxy.safety_policy import apply_safety_policy
+from alibabacloud.mcp_proxy.transport.http_client import ProxyDependencyError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -134,6 +135,11 @@ class ReconnectingSession:
                 try:
                     connection = await self._ensure_connection_locked(token)
                     return await callback(connection)
+                except ProxyDependencyError:
+                    # A missing local dependency cannot be fixed by reconnecting.
+                    # Preserve the actionable error instead of obscuring it behind
+                    # the generic "failed after N attempts" wrapper.
+                    raise
                 except Exception as exc:  # pragma: no cover - depends on upstream SDK exceptions
                     last_error = exc
                     LOGGER.warning(

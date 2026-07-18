@@ -15,7 +15,9 @@ from mcp import ClientSession, types
 from mcp.client.sse import sse_client
 from pydantic import AnyUrl
 
+from alibabacloud.mcp_proxy import __version__
 from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+from alibabacloud.mcp_proxy.transport.http_client import create_async_client
 
 LOGGER = logging.getLogger(__name__)
 
@@ -211,7 +213,7 @@ async def _sse_background_worker(
                 timeout: httpx.Timeout | None = None,
                 auth: httpx.Auth | None = None,
             ) -> httpx.AsyncClient:
-                return httpx.AsyncClient(
+                return create_async_client(
                     headers=headers,
                     timeout=timeout,
                     auth=auth,
@@ -282,7 +284,7 @@ class SseConnectionFactory:
     def _build_headers(self, bearer_token: str) -> dict[str, str]:
         return {
             "authorization": f"Bearer {bearer_token}",
-            "user-agent": "alibabacloud-mcp-proxy/0.1.0",
+            "user-agent": f"alibabacloud-mcp-proxy/{__version__}",
         }
 
     async def connect(self, *, bearer_token: str) -> SseConnection:

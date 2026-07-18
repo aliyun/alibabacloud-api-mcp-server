@@ -1,6 +1,6 @@
 [project]
 name = "alibabacloud.mcp-proxy"
-version = "0.2.12"
+version = "0.2.13"
 description = "Local stdio MCP proxy for Alibaba Cloud OpenAPI MCP servers."
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,7 +26,7 @@ dependencies = [
     "alibabacloud-openapi-util>=0.2.4",
     "alibabacloud-tea-openapi>=0.4.4",
     "alibabacloud-tea-util>=0.3.14",
-    "httpx>=0.28.1",
+    "httpx[socks]>=0.28.1",
     "mcp>=1.27.0",
 ]
 

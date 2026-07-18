@@ -7,6 +7,7 @@ from mcp import types
 
 from alibabacloud.mcp_proxy.config import RetrySettings
 from alibabacloud.mcp_proxy.session.reconnecting_session import ReconnectingSession
+from alibabacloud.mcp_proxy.transport.http_client import ProxyDependencyError
 
 
 class FakeTokenProvider:
@@ -61,6 +62,32 @@ class FakeConnectionFactory:
         )
         self.connections.append(connection)
         return connection
+
+
+class MissingSocksConnectionFactory:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def connect(self, *, bearer_token: str) -> FakeConnection:
+        self.calls += 1
+        raise ProxyDependencyError("SOCKS support is unavailable; install httpx[socks]")
+
+
+@pytest.mark.asyncio
+async def test_proxy_dependency_error_is_not_retried_or_wrapped() -> None:
+    token_provider = FakeTokenProvider(["stable-token"])
+    connection_factory = MissingSocksConnectionFactory()
+    session = ReconnectingSession(
+        connection_factory,
+        token_provider,
+        RetrySettings(max_attempts=3, base_delay_seconds=0.01, max_delay_seconds=0.01),
+    )
+
+    with pytest.raises(ProxyDependencyError, match=r"install httpx\[socks\]"):
+        await session.list_tools()
+
+    assert connection_factory.calls == 1
+    assert token_provider.calls == [False]
 
 
 @pytest.mark.asyncio

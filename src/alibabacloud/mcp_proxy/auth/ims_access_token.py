@@ -299,12 +299,17 @@ async def generate_access_token_async(
     client_id: str,
     scope: str,
     endpoint: str = DEFAULT_IMS_ENDPOINT,
+    policy: str | None = None,
     credential_client: CredentialClient | None = None,
 ):
     """
     Call IMS GenerateAccessToken using the given (or default) credential client.
 
     Uses RPC signing (signature algorithm v2) as required by alibabacloud-tea-openapi.
+
+    When *policy* is provided it is sent as the ``Policy`` parameter, letting the
+    caller further narrow the permissions embedded in the returned access token
+    (an in-place scope-down on top of the AK's own RAM policy).
     """
     from alibabacloud.mcp_proxy.auth.token_provider import BearerToken, TokenAcquisitionError
 
@@ -333,12 +338,13 @@ async def generate_access_token_async(
         req_body_type="json",
         body_type="json",
     )
-    queries = OpenApiUtilClient.query(
-        {
-            "ClientId": client_id,
-            "Scope": scope,
-        }
-    )
+    query_params: dict[str, Any] = {
+        "ClientId": client_id,
+        "Scope": scope,
+    }
+    if policy:
+        query_params["Policy"] = policy
+    queries = OpenApiUtilClient.query(query_params)
     request = OpenApiRequest(query=queries)
     runtime = RuntimeOptions()
 
@@ -365,11 +371,13 @@ class ImsBearerTokenSource:
         client_id: str,
         scope: str,
         endpoint: str = DEFAULT_IMS_ENDPOINT,
+        policy: str | None = None,
         credential_client: CredentialClient | None = None,
     ) -> None:
         self._client_id = client_id
         self._scope = scope
         self._endpoint = endpoint
+        self._policy = policy
         self._credential_client = credential_client
 
     async def fetch_token(self):
@@ -377,5 +385,6 @@ class ImsBearerTokenSource:
             client_id=self._client_id,
             scope=self._scope,
             endpoint=self._endpoint,
+            policy=self._policy,
             credential_client=self._credential_client,
         )

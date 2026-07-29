@@ -5,7 +5,11 @@ from unittest.mock import patch
 import pytest
 
 from alibabacloud.mcp_proxy.cli import build_parser, main, parse_config
-from alibabacloud.mcp_proxy.config import SiteType
+from alibabacloud.mcp_proxy.config import (
+    BOUNDARY_POLICY_MAX_LENGTH,
+    ProxyConfigurationError,
+    SiteType,
+)
 from alibabacloud.mcp_proxy.auth.token_provider import TokenAcquisitionError
 
 
@@ -103,6 +107,49 @@ def test_parse_config_cli_overrides_ims_defaults() -> None:
     assert config.token.ims_client_id == "111"
     assert config.token.ims_scope == "/cli-scope"
     assert config.token.ims_endpoint == "ims.cn-hangzhou.aliyuncs.com"
+
+
+_SAMPLE_BOUNDARY_POLICY = (
+    '{"Version":"1","Statement":[{"Effect":"Deny",'
+    '"NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+)
+
+
+def test_parse_config_boundary_policy_defaults_to_none(monkeypatch) -> None:
+    monkeypatch.delenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", raising=False)
+
+    config = parse_config([])
+
+    assert config.token.boundary_policy is None
+
+
+def test_parse_config_boundary_policy_from_cli() -> None:
+    config = parse_config(["--boundary-policy", _SAMPLE_BOUNDARY_POLICY])
+
+    assert config.token.boundary_policy == _SAMPLE_BOUNDARY_POLICY
+
+
+def test_parse_config_boundary_policy_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", _SAMPLE_BOUNDARY_POLICY)
+
+    config = parse_config([])
+
+    assert config.token.boundary_policy == _SAMPLE_BOUNDARY_POLICY
+
+
+def test_parse_config_boundary_policy_rejects_over_max_length(monkeypatch) -> None:
+    monkeypatch.delenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", raising=False)
+
+    with pytest.raises(ProxyConfigurationError, match="512 characters"):
+        parse_config(["--boundary-policy", "x" * (BOUNDARY_POLICY_MAX_LENGTH + 1)])
+
+
+def test_parse_config_boundary_policy_accepts_max_length(monkeypatch) -> None:
+    monkeypatch.delenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", raising=False)
+
+    config = parse_config(["--boundary-policy", "x" * BOUNDARY_POLICY_MAX_LENGTH])
+
+    assert config.token.boundary_policy == "x" * BOUNDARY_POLICY_MAX_LENGTH
 
 
 def test_parse_config_debug_flag() -> None:

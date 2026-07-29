@@ -170,6 +170,15 @@ def _add_proxy_arguments(parser: argparse.ArgumentParser) -> None:
         "Also settable via ALIBABACLOUD_MCP_SAFETY_POLICY.",
     )
     parser.add_argument(
+        "--boundary-policy",
+        dest="boundary_policy",
+        help="Extra RAM policy document (max 512 characters) used to narrow the "
+        "permissions of the generated access token in place. Follows Alibaba Cloud "
+        "RAM Policy syntax (Effect / Action / NotAction / Resource). When set, it is "
+        "passed as the Policy parameter of IMS GenerateAccessToken. "
+        "Also settable via ALIBABACLOUD_MCP_BOUNDARY_POLICY.",
+    )
+    parser.add_argument(
         "--retry-max-attempts",
         dest="max_attempts",
         type=int,
@@ -323,6 +332,7 @@ def parse_config(
         "bearer_token": args.bearer_token,
         "token_command": args.token_command,
         "safety_policy": args.safety_policy,
+        "boundary_policy": args.boundary_policy,
         "ims_client_id": args.ims_client_id,
         "ims_scope": args.ims_scope,
         "ims_endpoint": args.ims_endpoint,

@@ -105,6 +105,41 @@ export ALIBABACLOUD_MCP_SAFETY_POLICY="ecs:describe-*=allow,*=deny"
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+## 边界策略（原地权限缩减）
+
+可以通过 `--boundary-policy` 传入一个额外的 RAM 策略文档，用于对生成的访问令牌进行**原地权限缩减**——在当前 AK 自身 RAM 权限的基础上进一步收紧。
+
+策略文档最大 **512 字符**，遵循阿里云 RAM Policy 语法，支持 `Effect`、`Action`、`NotAction`、`Resource` 等标准字段。目前仅支持 `"Effect": "Deny"`（禁止）的写法。
+
+例如，禁止除 `ram:UpdateAccessKey` 之外的所有操作：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Deny",
+      "NotAction": "ram:UpdateAccessKey",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+命令行示例：
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --boundary-policy '{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+```
+
+也可以使用环境变量：
+
+```bash
+export ALIBABACLOUD_MCP_BOUNDARY_POLICY='{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+uvx alibabacloud.mcp-proxy@latest
+```
+
 ## Tool 白名单
 
 可以通过 `--allow-tools` 指定本次代理进程允许暴露和调用的 MCP tool。该限制会作为 `toolPolicy` 写入 Bearer Token，对上游 MCP Server 生效。
@@ -258,6 +293,8 @@ uvx alibabacloud.mcp-proxy@latest telemetry-view
 | `--bearer-token` | `ALIBABACLOUD_MCP_BEARER_TOKEN` | - | 显式指定上游 MCP Server 的 Bearer Token。 |
 | `--token-command` | `ALIBABACLOUD_MCP_TOKEN_COMMAND` | - | 输出 Bearer Token 或包含 `access_token` 的 JSON 的命令。 |
 | `--allow-tools` | `ALIBABACLOUD_MCP_ALLOW_TOOLS` | - | 允许暴露和调用的 MCP tool 名称列表，支持逗号分隔或多次传参。 |
+| `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | - | 限制允许调用的 MCP 工具的安全策略表达式（如 `ecs:describe-*=allow,*=deny`），在连接上游前应用到 Bearer Token 上。 |
+| `--boundary-policy` | `ALIBABACLOUD_MCP_BOUNDARY_POLICY` | - | 额外的 RAM 策略文档（最大 512 字符），对生成的访问令牌进行原地权限缩减，遵循 RAM Policy 语法（`Effect`/`Action`/`NotAction`/`Resource`）。传入后作为 IMS `GenerateAccessToken` 的 `Policy` 参数。 |
 | `--client-id` | `ALIBABACLOUD_MCP_CLIENT_ID` | 按站点选择 | IMS `GenerateAccessToken` ClientId。 |
 | `--scope` | `ALIBABACLOUD_MCP_SCOPE` | `/internal/acs/openapi` | IMS `GenerateAccessToken` Scope。 |
 | `--ims-endpoint` | `ALIBABACLOUD_MCP_IMS_ENDPOINT` | 按站点选择 | IMS API Endpoint。 |

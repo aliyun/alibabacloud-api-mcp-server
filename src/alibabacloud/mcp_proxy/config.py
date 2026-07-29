@@ -30,6 +30,9 @@ DEFAULT_IMS_CLIENT_ID_INTL = "4195410055503316452"
 DISCOVERY_ENDPOINT_CN = "openapi-mcp.cn-hangzhou.aliyuncs.com"
 DISCOVERY_ENDPOINT_INTL = "openapi-mcp.ap-southeast-1.aliyuncs.com"
 
+# Maximum length of the RAM boundary policy document (see --boundary-policy).
+BOUNDARY_POLICY_MAX_LENGTH = 512
+
 
 class ProxyConfigurationError(ValueError):
     """Raised when the proxy is missing required configuration."""
@@ -98,6 +101,7 @@ class TokenSettings:
     ims_endpoint: str
     refresh_skew_seconds: int = 60
     safety_policy: str | None = None
+    boundary_policy: str | None = None
     allowed_tools: tuple[str, ...] = ()
 
 
@@ -147,6 +151,13 @@ class AlibabaCloudProxyConfig:
         debug = (merged.get("debug") or "").strip().lower() in ("true", "1", "yes")
         log_file = (merged.get("log_file") or "").strip() or None
 
+        boundary_policy = (merged.get("boundary_policy") or "").strip() or None
+        if boundary_policy is not None and len(boundary_policy) > BOUNDARY_POLICY_MAX_LENGTH:
+            raise ProxyConfigurationError(
+                f"boundary policy must be at most {BOUNDARY_POLICY_MAX_LENGTH} characters "
+                f"(got {len(boundary_policy)})."
+            )
+
         return cls(
             site_type=site_type,
             server_url=server_url,
@@ -174,6 +185,7 @@ class AlibabaCloudProxyConfig:
                     field_name="refresh skew",
                 ),
                 safety_policy=(merged.get("safety_policy") or "").strip() or None,
+                boundary_policy=boundary_policy,
                 allowed_tools=_parse_csv(merged.get("allowed_tools")),
             ),
             retry=RetrySettings(
@@ -215,6 +227,7 @@ class AlibabaCloudProxyConfig:
             "ims_endpoint": _env("ALIBABACLOUD_MCP_IMS_ENDPOINT"),
             "refresh_skew_seconds": _env("ALIBABACLOUD_MCP_REFRESH_SKEW_SECONDS"),
             "safety_policy": _env("ALIBABACLOUD_MCP_SAFETY_POLICY"),
+            "boundary_policy": _env("ALIBABACLOUD_MCP_BOUNDARY_POLICY"),
             "allowed_tools": _env("ALIBABACLOUD_MCP_ALLOW_TOOLS"),
             "max_attempts": _env("ALIBABACLOUD_MCP_RETRY_MAX_ATTEMPTS"),
             "base_delay_seconds": _env("ALIBABACLOUD_MCP_RETRY_BASE_SECONDS"),

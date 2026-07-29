@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from alibabacloud.mcp_proxy.auth.ims_access_token import (
     extract_token_from_ims_api_response,
+    generate_access_token_async,
     parse_ims_generate_access_token_body,
 )
 from alibabacloud.mcp_proxy.auth.token_provider import TokenAcquisitionError
@@ -64,6 +66,57 @@ def test_parse_ims_body_rpc_error_message() -> None:
         parse_ims_generate_access_token_body(
             {"Code": "InvalidParameter", "Message": "bad scope", "RequestId": "x"}
         )
+
+
+_IMS_OK_RESPONSE = {
+    "body": {"Data": {"AccessToken": "jwt", "ExpiresIn": "3600"}},
+    "headers": {},
+    "statusCode": 200,
+}
+
+
+@pytest.mark.asyncio
+async def test_generate_access_token_includes_policy_query_when_set() -> None:
+    fake_client = MagicMock()
+    fake_client.call_api_async = AsyncMock(return_value=_IMS_OK_RESPONSE)
+    policy = (
+        '{"Version":"1","Statement":[{"Effect":"Deny",'
+        '"NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+    )
+
+    with patch(
+        "alibabacloud.mcp_proxy.auth.ims_access_token.OpenApiClient",
+        return_value=fake_client,
+    ):
+        token = await generate_access_token_async(
+            client_id="cid",
+            scope="/scope",
+            policy=policy,
+            credential_client=MagicMock(),
+        )
+
+    assert token.value == "jwt"
+    request = fake_client.call_api_async.await_args.args[1]
+    assert request.query.get("Policy") == policy
+
+
+@pytest.mark.asyncio
+async def test_generate_access_token_omits_policy_query_when_absent() -> None:
+    fake_client = MagicMock()
+    fake_client.call_api_async = AsyncMock(return_value=_IMS_OK_RESPONSE)
+
+    with patch(
+        "alibabacloud.mcp_proxy.auth.ims_access_token.OpenApiClient",
+        return_value=fake_client,
+    ):
+        await generate_access_token_async(
+            client_id="cid",
+            scope="/scope",
+            credential_client=MagicMock(),
+        )
+
+    request = fake_client.call_api_async.await_args.args[1]
+    assert "Policy" not in request.query
 
 
 def test_extract_token_from_tea_openapi_response_shape() -> None:

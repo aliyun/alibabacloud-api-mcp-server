@@ -113,6 +113,41 @@ export ALIBABACLOUD_MCP_SAFETY_POLICY="ecs:describe-*=allow,*=deny"
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+### Boundary Policy (In-place Permission Scope-down)
+
+Use `--boundary-policy` to supply an extra RAM policy document that **narrows the permissions of the generated access token in place** — tightening the token on top of the AK's own RAM permissions.
+
+The policy document is at most **512 characters** and follows Alibaba Cloud RAM Policy syntax, supporting the standard `Effect`, `Action`, `NotAction`, and `Resource` fields. Currently only the `"Effect": "Deny"` form is supported.
+
+For example, to deny every action except `ram:UpdateAccessKey`:
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Deny",
+      "NotAction": "ram:UpdateAccessKey",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Command line example:
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --boundary-policy '{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+```
+
+You can also set it via environment variable:
+
+```bash
+export ALIBABACLOUD_MCP_BOUNDARY_POLICY='{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+uvx alibabacloud.mcp-proxy@latest
+```
+
 ### Tool Allowlist
 
 Use `--allow-tools` to restrict which MCP tools this proxy process can expose and call. The proxy writes this restriction to the bearer token as `toolPolicy`, so it is enforced by the upstream MCP server.
@@ -281,6 +316,7 @@ Every CLI flag has a corresponding environment variable. **CLI flags take preced
 | CLI Flag | Environment Variable | Default | Description |
 |---|---|---|---|
 | `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | — | Safety policy expression to constrain allowed MCP tool calls (e.g. `ecs:describe-*=allow,*=deny`). Applied to the bearer token before connecting. |
+| `--boundary-policy` | `ALIBABACLOUD_MCP_BOUNDARY_POLICY` | — | Extra RAM policy document (max 512 characters) that narrows the generated access token's permissions in place. Follows RAM Policy syntax (`Effect`/`Action`/`NotAction`/`Resource`). Passed as the `Policy` parameter of IMS `GenerateAccessToken`. |
 
 #### Retry Settings
 

@@ -111,6 +111,7 @@ def build_token_provider(settings: TokenSettings) -> CachedBearerTokenProvider:
             client_id=settings.ims_client_id,
             scope=settings.ims_scope,
             endpoint=settings.ims_endpoint,
+            policy=settings.boundary_policy,
         )
 
     return CachedBearerTokenProvider(source, refresh_skew_seconds=settings.refresh_skew_seconds)

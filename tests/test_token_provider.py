@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +17,8 @@ from alibabacloud.mcp_proxy.auth.token_provider import (
     build_token_provider,
 )
 from alibabacloud.mcp_proxy.config import TokenSettings
+
+UTC = timezone.utc
 
 
 class FakeTokenSource:

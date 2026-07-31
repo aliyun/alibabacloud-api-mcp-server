@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import logging
+from datetime import datetime, timezone
 
 import pytest
 
 from alibabacloud.mcp_proxy.auth.ims_access_token import (
+    _log_ims_generate_access_token_response,
     extract_token_from_ims_api_response,
     parse_ims_generate_access_token_body,
 )
 from alibabacloud.mcp_proxy.auth.token_provider import TokenAcquisitionError
+
+UTC = timezone.utc
 
 
 def test_parse_ims_body_extracts_access_token_pascal_case() -> None:
@@ -83,3 +87,25 @@ def test_extract_token_from_tea_openapi_response_shape() -> None:
     token, expires = extract_token_from_ims_api_response(resp)
     assert token == "eyJhbGciOiJ.unit-test"
     assert expires is not None
+
+
+def test_generate_access_token_debug_log_never_contains_raw_token(caplog) -> None:
+    secret = "eyJhbGciOiJ.must-not-appear"
+    response = {
+        "body": {
+            "Data": {
+                "AccessToken": secret,
+                "ExpiresIn": "259199",
+            }
+        },
+        "statusCode": 200,
+    }
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="alibabacloud.mcp_proxy.auth.ims_access_token",
+    ):
+        _log_ims_generate_access_token_response(response)
+
+    assert secret not in caplog.text
+    assert "***REDACTED***" in caplog.text

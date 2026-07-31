@@ -52,6 +52,13 @@ _PLUGIN_TELEMETRY_FIELDS: tuple[tuple[str, str, bool], ...] = (
 
 _LOGGER = logging.getLogger(__name__)
 
+_PAYLOAD_LOGGING_NAMESPACES = (
+    "mcp.client.streamable_http",
+    "mcp.shared.jsonrpc_dispatcher",
+    "httpx2",
+    "httpcore2",
+)
+
 
 def _configure_logging(*, debug: bool, log_file: str | None) -> Path | None:
     """Configure logging based on the --debug flag.
@@ -75,6 +82,8 @@ def _configure_logging(*, debug: bool, log_file: str | None) -> Path | None:
 
     level = logging.DEBUG
     root.setLevel(level)
+    for logger_name in _PAYLOAD_LOGGING_NAMESPACES:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
     log_path = Path(log_file)  # type: ignore[arg-type]
     try:

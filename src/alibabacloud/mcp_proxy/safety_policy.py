@@ -70,9 +70,9 @@ async def apply_safety_policy(
     Raises on API errors so the caller can decide whether to abort or retry.
     """
     _LOGGER.debug(
-        "Applying safety policy to bearer token (policy=%r, token=%s...)",
+        "Applying safety policy (policy=%r, bearer_token_present=%s)",
         safety_policy,
-        bearer_token[:12] if len(bearer_token) > 12 else "***",
+        bool(bearer_token),
     )
 
     client = _create_anonymous_client()

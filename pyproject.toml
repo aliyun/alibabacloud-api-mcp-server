@@ -26,8 +26,8 @@ dependencies = [
     "alibabacloud-openapi-util>=0.2.4",
     "alibabacloud-tea-openapi>=0.4.4",
     "alibabacloud-tea-util>=0.3.14",
-    "httpx[socks]>=0.28.1",
-    "mcp>=1.27.0,<2.0.0",
+    "httpx2[socks]>=2.9.1",
+    "mcp>=2.0.0,<3.0.0",
 ]
 
 [project.urls]

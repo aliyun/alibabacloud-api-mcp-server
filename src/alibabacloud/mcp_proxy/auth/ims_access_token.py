@@ -63,7 +63,7 @@ def _response_to_json_text(obj: Any) -> str:
 
 
 def _log_ims_generate_access_token_response(response: Any) -> None:
-    """Log tea ``call_api_async`` return value: INFO = redacted, DEBUG = full raw JSON."""
+    """Log the tea response with credential material redacted at every level."""
     try:
         _LOGGER.info(
             "IMS GenerateAccessToken response (tokens redacted): %s",
@@ -71,14 +71,11 @@ def _log_ims_generate_access_token_response(response: Any) -> None:
         )
     except (TypeError, ValueError) as exc:
         _LOGGER.info(
-            "IMS GenerateAccessToken response (serialize failed: %s): %r",
+            "IMS GenerateAccessToken response redaction failed: %s "
+            "(response type: %s)",
             exc,
-            response,
+            type(response).__name__,
         )
-    try:
-        _LOGGER.debug("IMS GenerateAccessToken raw response: %s", _response_to_json_text(response))
-    except (TypeError, ValueError):
-        _LOGGER.debug("IMS GenerateAccessToken raw response (repr): %r", response)
 
 
 def get_default_credential_client() -> CredentialClient:

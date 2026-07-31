@@ -121,6 +121,55 @@
 
 代理工具的安装、MCP 客户端配置、安全策略和预检查说明请参考：[Alibaba Cloud MCP Proxy 使用说明](README-PROXY.md)。
 
+### 本地 Proxy 双协议联合验证
+
+仓库内的 `scripts/mcp_proxy_e2e.py` 会从当前源码启动 Proxy，并通过 stdio
+连接运行时传入的远程 MCP 地址。测试目标和凭证不会写入仓库；请先按
+`README-PROXY.md` 配置凭证，再通过环境变量传入目标地址。
+
+验证 MCP `2026-07-28`（`auto` 会真实执行 `server/discover`）：
+
+```bash
+uv run python scripts/mcp_proxy_e2e.py \
+  --server-url "$MCP_PRE_URL" \
+  --mode auto \
+  --log-file /tmp/mcp-proxy-modern.log \
+  --list-repeat-count 3 \
+  --parallel-list-count 10 \
+  --run-protocol-behavior-smoke \
+  --run-all-tools-smoke
+```
+
+验证 legacy initialize/session 回归：
+
+```bash
+uv run python scripts/mcp_proxy_e2e.py \
+  --server-url "$MCP_PRE_URL" \
+  --mode legacy \
+  --log-file /tmp/mcp-proxy-legacy.log \
+  --list-repeat-count 3 \
+  --parallel-list-count 10 \
+  --run-protocol-behavior-smoke \
+  --run-all-tools-smoke
+```
+
+`--run-readonly-tool-smoke` 会依次验证 ListProducts、ListApis、
+ListProductRegions 和 GetApiDefinition；`--list-repeat-count` 可验证同一连接上的
+重复请求，`--parallel-list-count` 可验证同一 stdio 连接上的并发请求。使用
+`--mode 2026-07-28` 可以跳过 discover，直接验证 modern 业务首包。
+
+`--run-runscript-smoke` 会执行只读 ECS `DescribeRegions`，保留 RunScript
+返回的 `processID`，并持续调用 `AlibabaCloud___GetTask` 直到真实终态。
+`--run-all-tools-smoke` 会验证预发完整 15 工具契约：检索、文档和命令生成
+工具执行真实只读调用，GetPresignedUrl 仅签发 60 秒上传票据且不上传文件，
+RunScript/GetTask 执行只读 `DescribeRegions`，RunIaC 使用空参数验证其在创建
+进程前返回 `ValidationFailed`。`--run-protocol-behavior-smoke` 还会验证 ping、
+未知工具、缺少必填参数以及 prompts/resources 的协议行为；现代协议应拒绝
+已移除的非 tools 方法，legacy 则按上游能力转发。`--print-tool-contracts`
+仅输出工具名和 input schema 的字段结构，不输出 description 或响应正文。
+Proxy debug 日志只记录上游 method、protocol mode、HTTP status 和 session
+header 是否存在，不记录 bearer token、工具参数或临时凭证。
+
 ## 最佳实践
 
 - 📘 [OpenAPI MCP Server Core 最佳实践](docs/best-practices.md)：介绍如何结合 `Skill` 与 `safety policy`，基于 MCP Server Core 构建高效、安全、适合生产环境的 Agent 集成方案。

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -19,18 +20,23 @@ class FakeClient:
 @pytest.mark.asyncio
 async def test_apply_safety_policy_includes_tool_policy_and_empty_safe_policy(
     monkeypatch,
+    caplog,
 ) -> None:
     client = FakeClient()
     monkeypatch.setattr(safety_policy, "_create_anonymous_client", lambda: client)
+    caplog.set_level(logging.DEBUG)
+    bearer_token = "TOKEN_SENTINEL_123456789"
 
     await safety_policy.apply_safety_policy(
-        "bearer-token",
+        bearer_token,
         None,
         allowed_tools=("AlibabaCloud___RunScript", "AlibabaCloud___GetTask"),
     )
 
     assert client.requests[0].body == {
-        "bearerToken": "bearer-token",
+        "bearerToken": bearer_token,
         "safePolicy": "{\"rules\":[]}",
         "toolPolicy": "{\"allowedTools\":[\"AlibabaCloud___RunScript\",\"AlibabaCloud___GetTask\"]}",
     }
+    assert bearer_token not in caplog.text
+    assert bearer_token[:12] not in caplog.text

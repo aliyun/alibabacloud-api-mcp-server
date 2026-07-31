@@ -1,22 +1,30 @@
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 import anyio
-import httpx
+import httpx2
 from anyio.abc import TaskGroup
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # type: ignore[no-redef]
-from mcp import ClientSession, types
+from mcp import Client, types
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import MCPError
 from pydantic import AnyUrl
 
-from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
 from alibabacloud.mcp_proxy import __version__
+from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+from alibabacloud.mcp_proxy.protocol import (
+    LEGACY_PROTOCOL_MODE,
+    ProtocolMode,
+    UnsupportedProtocolFeatureError,
+)
 from alibabacloud.mcp_proxy.session_marker import write_mcp_session_marker
 from alibabacloud.mcp_proxy.transport.http_client import create_async_client
 
@@ -25,12 +33,88 @@ LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+class UpstreamHttpResponseError(RuntimeError):
+    """Preserves an upstream HTTP status hidden by the MCP transport."""
+
+    def __init__(self, status_code: int, cause: BaseException) -> None:
+        self.status_code = status_code
+        self.__cause__ = cause
+        super().__init__(f"Upstream HTTP response status={status_code}")
+
+
+@dataclass(slots=True)
+class _HttpAuditState:
+    protocol_mode: ProtocolMode
+    pending_error_status: int | None = None
+    marked_session_id: str | None = None
+
+    def clear(self) -> None:
+        self.pending_error_status = None
+
+    def wrap_error(self, error: BaseException) -> BaseException:
+        if self.pending_error_status is None:
+            return error
+        status_code = self.pending_error_status
+        self.pending_error_status = None
+        if (
+            400 <= status_code < 500
+            and status_code not in (401, 403)
+            and isinstance(error, MCPError)
+        ):
+            return error
+        return UpstreamHttpResponseError(status_code, error)
+
+
+def _build_http_event_hooks(
+    state: _HttpAuditState,
+) -> dict[str, list[Callable[..., Awaitable[None]]]]:
+    async def audit_request(request: httpx2.Request) -> None:
+        method = request.headers.get("Mcp-Method")
+        if method is None and request.method == "POST":
+            try:
+                payload = json.loads(request.content)
+                method = payload.get("method") if isinstance(payload, dict) else None
+            except (ValueError, TypeError, httpx2.RequestNotRead):
+                method = None
+        LOGGER.debug(
+            "MCP upstream request transport=streamable-http "
+            "protocol_mode=%s method=%s session_header_present=%s",
+            state.protocol_mode,
+            method or "<unknown>",
+            "Mcp-Session-Id" in request.headers,
+        )
+
+    async def audit_response(response: httpx2.Response) -> None:
+        session_id = response.headers.get("Mcp-Session-Id")
+        LOGGER.debug(
+            "MCP upstream response transport=streamable-http "
+            "protocol_mode=%s status=%s session_header_present=%s",
+            state.protocol_mode,
+            response.status_code,
+            session_id is not None,
+        )
+        if response.request.method == "POST" and response.status_code >= 400:
+            state.pending_error_status = response.status_code
+        if (
+            state.protocol_mode == LEGACY_PROTOCOL_MODE
+            and session_id
+            and session_id != state.marked_session_id
+        ):
+            state.marked_session_id = session_id
+            write_mcp_session_marker(session_id)
+
+    return {
+        "request": [audit_request],
+        "response": [audit_response],
+    }
+
+
 class _RpcRequest:
     """A single RPC request dispatched to the background Streamable HTTP task."""
 
     __slots__ = ("caller", "result_event", "result", "error")
 
-    def __init__(self, caller: Callable[[ClientSession], Awaitable[Any]]) -> None:
+    def __init__(self, caller: Callable[[Client], Awaitable[Any]]) -> None:
         self.caller = caller
         self.result_event = anyio.Event()
         self.result: Any = None
@@ -101,7 +185,7 @@ class StreamableHttpConnection:
 
     async def _dispatch(
         self,
-        caller: Callable[[ClientSession], Awaitable[T]],
+        caller: Callable[[Client], Awaitable[T]],
     ) -> T:
         request: _RpcRequest = _RpcRequest(caller)
         try:
@@ -114,28 +198,65 @@ class StreamableHttpConnection:
         return await request.wait(self._done_event, self._worker_error_holder)
 
     async def list_prompts(self) -> types.ListPromptsResult:
-        return await self._dispatch(lambda s: s.list_prompts())
+        return await self._dispatch(lambda client: client.list_prompts())
 
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None
     ) -> types.GetPromptResult:
-        return await self._dispatch(lambda s: s.get_prompt(name, arguments))
+        result = await self._dispatch(
+            lambda client: client.session.get_prompt(
+                name,
+                arguments,
+                allow_input_required=True,
+            )
+        )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        return result
 
     async def list_resources(self) -> types.ListResourcesResult:
-        return await self._dispatch(lambda s: s.list_resources())
+        return await self._dispatch(lambda client: client.list_resources())
 
     async def read_resource(self, uri: AnyUrl) -> types.ReadResourceResult:
-        return await self._dispatch(lambda s: s.read_resource(uri))
+        result = await self._dispatch(
+            lambda client: client.session.read_resource(
+                str(uri),
+                allow_input_required=True,
+            )
+        )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        return result
 
     async def list_tools(self) -> types.ListToolsResult:
-        return await self._dispatch(lambda s: s.list_tools())
+        return await self._dispatch(lambda client: client.list_tools())
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any] | None
     ) -> types.CallToolResult:
-        return await self._dispatch(
-            lambda s: s.call_tool(name, arguments or {})
+        result = await self._dispatch(
+            lambda client: client.session.call_tool(
+                name,
+                arguments or {},
+                allow_input_required=True,
+            )
         )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        if not isinstance(result, types.CallToolResult):
+            raise UnsupportedProtocolFeatureError(
+                f"Unsupported upstream tools/call result: {type(result).__name__}."
+            )
+        return result
 
     async def close(self) -> None:
         """Signal the background task to shut down and wait for it."""
@@ -150,6 +271,7 @@ async def _streamable_http_background_worker(
     server_url: str,
     config: AlibabaCloudProxyConfig,
     headers: dict[str, str],
+    protocol_mode: ProtocolMode,
     request_receiver: anyio.abc.ObjectReceiveStream[_RpcRequest | None],
     ready_event: anyio.Event,
     done_event: anyio.Event,
@@ -159,50 +281,57 @@ async def _streamable_http_background_worker(
     """Background task that owns the streamable_http_client context.
 
     All cancel scopes created by ``streamable_http_client`` and
-    ``ClientSession`` live entirely within this task, so they never
+    ``Client`` live entirely within this task, so they never
     interfere with the caller's cancel-scope stack.
 
     The session is initialized once and then reused for all subsequent
     RPC calls until the connection is closed or an error occurs.
     """
+    audit_state = _HttpAuditState(protocol_mode=protocol_mode)
+
     try:
         http_client = create_async_client(
             headers=headers,
-            timeout=httpx.Timeout(
+            timeout=httpx2.Timeout(
                 connect=config.connect_timeout_seconds,
                 read=config.read_timeout_seconds,
                 write=config.read_timeout_seconds,
                 pool=config.connect_timeout_seconds,
             ),
             follow_redirects=True,
+            event_hooks=_build_http_event_hooks(audit_state),
+        )
+        transport = streamable_http_client(
+            server_url,
+            http_client=http_client,
+            terminate_on_close=False,
         )
         async with http_client:
-            async with streamable_http_client(
-                server_url,
-                http_client=http_client,
-                terminate_on_close=False,
-            ) as streams:
-                get_session_id = streams[2]
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    write_mcp_session_marker(get_session_id())
-                    ready_event.set()
+            async with Client(
+                transport,
+                mode=protocol_mode,
+                cache=None,
+            ) as client:
+                ready_event.set()
 
-                    async with request_receiver:
-                        async for request in request_receiver:
-                            if request is None:
-                                break
-                            try:
-                                result = await request.caller(session)
-                                request.set_result(result)
-                            except BaseException as exc:
-                                request.set_error(exc)
+                async with request_receiver:
+                    async for request in request_receiver:
+                        if request is None:
+                            break
+                        audit_state.clear()
+                        try:
+                            result = await request.caller(client)
+                            request.set_result(result)
+                        except BaseException as exc:
+                            request.set_error(audit_state.wrap_error(exc))
     except BaseException as exc:
         root_cause = exc
         if isinstance(exc, BaseExceptionGroup):
             exceptions = exc.exceptions
             if len(exceptions) == 1:
                 root_cause = exceptions[0]
+
+        root_cause = audit_state.wrap_error(root_cause)
 
         if not ready_event.is_set():
             startup_error_holder.append(root_cause)
@@ -241,7 +370,12 @@ class StreamableHttpConnectionFactory:
             "user-agent": f"alibabacloud-mcp-proxy/{__version__}",
         }
 
-    async def connect(self, *, bearer_token: str) -> StreamableHttpConnection:
+    async def connect(
+        self,
+        *,
+        bearer_token: str,
+        protocol_mode: ProtocolMode,
+    ) -> StreamableHttpConnection:
         """Create a new Streamable HTTP connection running in a background task."""
         if self._task_group is None:
             raise RuntimeError(
@@ -263,6 +397,7 @@ class StreamableHttpConnectionFactory:
             self._server_url,
             self._config,
             headers,
+            protocol_mode,
             request_receiver,
             ready_event,
             done_event,

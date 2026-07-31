@@ -6,17 +6,23 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 import anyio
-import httpx
+import httpx2
 from anyio.abc import TaskGroup
 
 if sys.version_info < (3, 11):
     from exceptiongroup import BaseExceptionGroup  # type: ignore[no-redef]
-from mcp import ClientSession, types
+from mcp import Client, types
 from mcp.client.sse import sse_client
 from pydantic import AnyUrl
 
 from alibabacloud.mcp_proxy import __version__
 from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+from alibabacloud.mcp_proxy.protocol import (
+    LEGACY_PROTOCOL_MODE,
+    ProtocolMode,
+    UnsupportedProtocolFeatureError,
+    UnsupportedProtocolTransportError,
+)
 from alibabacloud.mcp_proxy.transport.http_client import create_async_client
 
 LOGGER = logging.getLogger(__name__)
@@ -24,7 +30,7 @@ LOGGER = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-class LegacySseSessionExpiredError(httpx.HTTPStatusError):
+class LegacySseSessionExpiredError(httpx2.HTTPStatusError):
     """Raised when a legacy SSE message endpoint no longer knows its session."""
 
 
@@ -38,7 +44,7 @@ class _RpcRequest:
 
     __slots__ = ("caller", "result_event", "result", "error")
 
-    def __init__(self, caller: Callable[[ClientSession], Awaitable[Any]]) -> None:
+    def __init__(self, caller: Callable[[Client], Awaitable[Any]]) -> None:
         self.caller = caller
         self.result_event = anyio.Event()
         self.result: Any = None
@@ -111,7 +117,7 @@ class SseConnection:
 
     async def _dispatch(
         self,
-        caller: Callable[[ClientSession], Awaitable[T]],
+        caller: Callable[[Client], Awaitable[T]],
     ) -> T:
         request: _RpcRequest = _RpcRequest(caller)
         try:
@@ -124,28 +130,65 @@ class SseConnection:
         return await request.wait(self._done_event, self._worker_error_holder)
 
     async def list_prompts(self) -> types.ListPromptsResult:
-        return await self._dispatch(lambda s: s.list_prompts())
+        return await self._dispatch(lambda client: client.list_prompts())
 
     async def get_prompt(
         self, name: str, arguments: dict[str, str] | None
     ) -> types.GetPromptResult:
-        return await self._dispatch(lambda s: s.get_prompt(name, arguments))
+        result = await self._dispatch(
+            lambda client: client.session.get_prompt(
+                name,
+                arguments,
+                allow_input_required=True,
+            )
+        )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        return result
 
     async def list_resources(self) -> types.ListResourcesResult:
-        return await self._dispatch(lambda s: s.list_resources())
+        return await self._dispatch(lambda client: client.list_resources())
 
     async def read_resource(self, uri: AnyUrl) -> types.ReadResourceResult:
-        return await self._dispatch(lambda s: s.read_resource(uri))
+        result = await self._dispatch(
+            lambda client: client.session.read_resource(
+                str(uri),
+                allow_input_required=True,
+            )
+        )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        return result
 
     async def list_tools(self) -> types.ListToolsResult:
-        return await self._dispatch(lambda s: s.list_tools())
+        return await self._dispatch(lambda client: client.list_tools())
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any] | None
     ) -> types.CallToolResult:
-        return await self._dispatch(
-            lambda s: s.call_tool(name, arguments or {})
+        result = await self._dispatch(
+            lambda client: client.session.call_tool(
+                name,
+                arguments or {},
+                allow_input_required=True,
+            )
         )
+        if isinstance(result, types.InputRequiredResult):
+            raise UnsupportedProtocolFeatureError(
+                "Upstream returned resultType='input_required'; "
+                "multi-round requests are not supported by this proxy."
+            )
+        if not isinstance(result, types.CallToolResult):
+            raise UnsupportedProtocolFeatureError(
+                f"Unsupported upstream tools/call result: {type(result).__name__}."
+            )
+        return result
 
     async def close(self) -> None:
         """Signal the background SSE task to shut down and wait for it."""
@@ -169,7 +212,7 @@ async def _sse_background_worker(
 ) -> None:
     """Background task that owns the sse_client context.
 
-    All cancel scopes created by ``sse_client`` and ``ClientSession`` live
+    All cancel scopes created by ``sse_client`` and ``Client`` live
     entirely within this task, so they never interfere with the caller's
     cancel-scope stack.
 
@@ -180,7 +223,7 @@ async def _sse_background_worker(
     transport_error_holder: list[BaseException] = []
     try:
         with anyio.CancelScope() as worker_cancel_scope:
-            async def inspect_response(response: httpx.Response) -> None:
+            async def inspect_response(response: httpx2.Response) -> None:
                 if response.request.method != "POST":
                     return
 
@@ -190,15 +233,14 @@ async def _sse_background_worker(
                         return
 
                     error = LegacySseSessionExpiredError(
-                        f"Legacy SSE session expired (404): {response.text}",
+                        "Legacy SSE session expired (404)",
                         request=response.request,
                         response=response,
                     )
                 elif 500 <= response.status_code < 600:
                     await response.aread()
-                    error = httpx.HTTPStatusError(
-                        f"Legacy SSE POST failed ({response.status_code}): "
-                        f"{response.text}",
+                    error = httpx2.HTTPStatusError(
+                        f"Legacy SSE POST failed ({response.status_code})",
                         request=response.request,
                         response=response,
                     )
@@ -210,9 +252,9 @@ async def _sse_background_worker(
 
             def httpx_client_factory(
                 headers: dict[str, str] | None = None,
-                timeout: httpx.Timeout | None = None,
-                auth: httpx.Auth | None = None,
-            ) -> httpx.AsyncClient:
+                timeout: httpx2.Timeout | None = None,
+                auth: httpx2.Auth | None = None,
+            ) -> httpx2.AsyncClient:
                 return create_async_client(
                     headers=headers,
                     timeout=timeout,
@@ -221,28 +263,31 @@ async def _sse_background_worker(
                     event_hooks={"response": [inspect_response]},
                 )
 
-            async with sse_client(
+            transport = sse_client(
                 server_url,
                 headers=headers,
                 timeout=config.connect_timeout_seconds,
                 sse_read_timeout=config.read_timeout_seconds,
                 httpx_client_factory=httpx_client_factory,
-            ) as streams:
-                async with ClientSession(streams[0], streams[1]) as session:
-                    await session.initialize()
-                    # Signal that the session is ready.
-                    ready_event.set()
+            )
+            async with Client(
+                transport,
+                mode=LEGACY_PROTOCOL_MODE,
+                cache=None,
+            ) as client:
+                # Signal that the session is ready.
+                ready_event.set()
 
-                    async with request_receiver:
-                        async for request in request_receiver:
-                            if request is None:
-                                # Shutdown signal.
-                                break
-                            try:
-                                result = await request.caller(session)
-                                request.set_result(result)
-                            except BaseException as exc:
-                                request.set_error(exc)
+                async with request_receiver:
+                    async for request in request_receiver:
+                        if request is None:
+                            # Shutdown signal.
+                            break
+                        try:
+                            result = await request.caller(client)
+                            request.set_result(result)
+                        except BaseException as exc:
+                            request.set_error(exc)
 
         if transport_error_holder:
             raise transport_error_holder[-1]
@@ -287,13 +332,22 @@ class SseConnectionFactory:
             "user-agent": f"alibabacloud-mcp-proxy/{__version__}",
         }
 
-    async def connect(self, *, bearer_token: str) -> SseConnection:
+    async def connect(
+        self,
+        *,
+        bearer_token: str,
+        protocol_mode: ProtocolMode,
+    ) -> SseConnection:
         """Create a new SSE connection running in a background task.
 
         The ``sse_client`` context (and its internal ``TaskGroup``) lives
         entirely inside a background task spawned on the external task
         group.  This keeps the caller's cancel-scope stack clean.
         """
+        if protocol_mode != LEGACY_PROTOCOL_MODE:
+            raise UnsupportedProtocolTransportError(
+                "MCP 2026-07-28 is not supported over legacy SSE transport."
+            )
         if self._task_group is None:
             raise RuntimeError(
                 "SseConnectionFactory requires a task group. "

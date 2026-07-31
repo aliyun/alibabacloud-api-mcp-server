@@ -8,6 +8,7 @@ import pytest
 from aiohttp import web
 
 from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig, RetrySettings
+from alibabacloud.mcp_proxy.protocol import UnsupportedProtocolTransportError
 from alibabacloud.mcp_proxy.session.reconnecting_session import ReconnectingSession
 from alibabacloud.mcp_proxy.transport.upstream_sse import SseConnectionFactory
 
@@ -15,6 +16,7 @@ from alibabacloud.mcp_proxy.transport.upstream_sse import SseConnectionFactory
 @pytest.mark.asyncio
 async def test_legacy_session_404_reconnects_and_retries_request(
     aiohttp_server,
+    caplog,
 ) -> None:
     session_queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
     created_sessions: list[str] = []
@@ -69,7 +71,12 @@ async def test_legacy_session_404_reconnects_and_retries_request(
             tools_list_sessions.append(session_id)
             if session_id == "session-1":
                 return web.json_response(
-                    {"error": f"Session not found: {session_id}"},
+                    {
+                        "error": (
+                            f"Session not found: {session_id} "
+                            "SECRET_RESPONSE_BODY"
+                        )
+                    },
                     status=404,
                 )
             await session_queues[session_id].put(
@@ -119,7 +126,7 @@ async def test_legacy_session_404_reconnects_and_retries_request(
         )
         try:
             with anyio.fail_after(1):
-                result = await session.list_tools()
+                result = await session.list_tools(protocol_mode="legacy")
         finally:
             task_group.cancel_scope.cancel()
 
@@ -127,11 +134,13 @@ async def test_legacy_session_404_reconnects_and_retries_request(
     assert created_sessions == ["session-1", "session-2"]
     assert tools_list_sessions == ["session-1", "session-2"]
     assert token_provider.calls == [False, False]
+    assert "SECRET_RESPONSE_BODY" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_initialize_503_reconnects_with_a_new_legacy_sse_session(
     aiohttp_server,
+    caplog,
 ) -> None:
     session_queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
     created_sessions: list[str] = []
@@ -169,7 +178,10 @@ async def test_initialize_503_reconnects_with_a_new_legacy_sse_session(
         if method == "initialize":
             initialize_sessions.append(session_id)
             if session_id == "session-1":
-                return web.Response(status=503, text="Service Unavailable")
+                return web.Response(
+                    status=503,
+                    text="Service Unavailable SECRET_RESPONSE_BODY",
+                )
             await session_queues[session_id].put(
                 {
                     "jsonrpc": "2.0",
@@ -235,7 +247,7 @@ async def test_initialize_503_reconnects_with_a_new_legacy_sse_session(
         )
         try:
             with anyio.fail_after(1):
-                result = await session.list_tools()
+                result = await session.list_tools(protocol_mode="legacy")
         finally:
             task_group.cancel_scope.cancel()
 
@@ -244,3 +256,52 @@ async def test_initialize_503_reconnects_with_a_new_legacy_sse_session(
     assert initialize_sessions == ["session-1", "session-2"]
     assert tools_list_sessions == ["session-2"]
     assert token_provider.calls == [False, False]
+    assert "SECRET_RESPONSE_BODY" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_modern_sse_is_rejected_before_network_or_task_group() -> None:
+    config = AlibabaCloudProxyConfig.from_mapping(
+        {"server_url": "https://does-not-run.example/sse"}
+    )
+    factory = SseConnectionFactory(config, config.server_url)
+
+    with pytest.raises(
+        UnsupportedProtocolTransportError,
+        match="2026-07-28.*SSE",
+    ):
+        await factory.connect(
+            bearer_token="unused-token",
+            protocol_mode="2026-07-28",
+        )
+
+
+@pytest.mark.asyncio
+async def test_modern_sse_error_is_not_retried_by_session() -> None:
+    class TokenProvider:
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+
+        async def get_token(self, *, force_refresh: bool = False) -> str:
+            self.calls.append(force_refresh)
+            return "unused-token"
+
+    config = AlibabaCloudProxyConfig.from_mapping(
+        {"server_url": "https://does-not-run.example/sse"}
+    )
+    factory = SseConnectionFactory(config, config.server_url)
+    token_provider = TokenProvider()
+    session = ReconnectingSession(
+        factory,
+        token_provider,
+        RetrySettings(
+            max_attempts=3,
+            base_delay_seconds=0.01,
+            max_delay_seconds=0.01,
+        ),
+    )
+
+    with pytest.raises(UnsupportedProtocolTransportError):
+        await session.list_tools(protocol_mode="2026-07-28")
+
+    assert token_provider.calls == [False]

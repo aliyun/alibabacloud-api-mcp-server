@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import pytest
 
-from alibabacloud.mcp_proxy.cli import build_parser, main, parse_config
+from alibabacloud.mcp_proxy.cli import (
+    _configure_logging,
+    build_parser,
+    main,
+    parse_config,
+)
 from alibabacloud.mcp_proxy.config import SiteType
 from alibabacloud.mcp_proxy.auth.token_provider import TokenAcquisitionError
 
@@ -136,6 +142,43 @@ def test_main_runtime_token_error_without_debug() -> None:
         pytest.raises(SystemExit, match="boom"),
     ):
         main([])
+
+
+def test_debug_logging_keeps_proxy_audit_but_silences_sensitive_sdk_payloads(
+    tmp_path,
+) -> None:
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_root_level = root.level
+    logger_names = (
+        "mcp.client.streamable_http",
+        "mcp.shared.jsonrpc_dispatcher",
+        "httpx2",
+        "httpcore2",
+    )
+    original_levels = {
+        name: logging.getLogger(name).level
+        for name in logger_names
+    }
+
+    try:
+        _configure_logging(
+            debug=True,
+            log_file=str(tmp_path / "proxy.log"),
+        )
+
+        assert logging.getLogger(
+            "alibabacloud.mcp_proxy.transport.upstream_http"
+        ).getEffectiveLevel() == logging.DEBUG
+        for name in logger_names:
+            assert logging.getLogger(name).getEffectiveLevel() >= logging.WARNING
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers[:] = original_handlers
+        root.setLevel(original_root_level)
+        for name, level in original_levels.items():
+            logging.getLogger(name).setLevel(level)
 
 
 def test_telemetry_view_subcommand_default_port() -> None:

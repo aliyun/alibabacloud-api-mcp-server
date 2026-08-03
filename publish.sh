@@ -6,6 +6,7 @@
 #   ./publish.sh              # publish to production PyPI
 #   ./publish.sh --test       # publish to TestPyPI first
 #   ./publish.sh --dry-run    # build only, do not upload
+#   ./publish.sh --skip-git-tag  # publish without creating a Git release tag
 #
 # Prerequisites:
 #   1. pip install build twine
@@ -24,15 +25,18 @@ cd "$SCRIPT_DIR"
 # ---------------------------------------------------------------------------
 USE_TEST_PYPI=false
 DRY_RUN=false
+SKIP_GIT_TAG=false
 
 for arg in "$@"; do
     case "$arg" in
         --test)     USE_TEST_PYPI=true ;;
         --dry-run)  DRY_RUN=true ;;
+        --skip-git-tag) SKIP_GIT_TAG=true ;;
         -h|--help)
-            echo "Usage: $0 [--test] [--dry-run]"
-            echo "  --test      Upload to TestPyPI instead of production PyPI"
-            echo "  --dry-run   Build only, do not upload"
+            echo "Usage: $0 [--test] [--dry-run] [--skip-git-tag]"
+            echo "  --test          Upload to TestPyPI instead of production PyPI"
+            echo "  --dry-run       Build only, do not upload or tag"
+            echo "  --skip-git-tag  Publish without creating the v<version> Git tag"
             exit 0
             ;;
         *)
@@ -48,7 +52,7 @@ done
 echo "==> Checking build dependencies..."
 
 for cmd in python3 pip; do
-    if ! command -v "$cmd" &>/dev/null; then
+    if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "Error: '$cmd' is not installed."
         exit 1
     fi
@@ -134,6 +138,62 @@ rm -rf dist/ build/
 find src/ -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# Step 2.5: Verify the Git release tag can be created after upload
+# ---------------------------------------------------------------------------
+TAG_NAME="v${LOCAL_VERSION}"
+CREATE_GIT_TAG=false
+
+if [ "$DRY_RUN" = false ] && [ "$USE_TEST_PYPI" = false ] && [ "$SKIP_GIT_TAG" = false ]; then
+    CREATE_GIT_TAG=true
+fi
+
+if [ "$CREATE_GIT_TAG" = true ]; then
+    echo "==> Verifying Git release tag ${TAG_NAME} can be created..."
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "Error: 'git' is not installed; cannot create release tag ${TAG_NAME}."
+        exit 1
+    fi
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "Error: not inside a Git work tree; cannot create release tag ${TAG_NAME}."
+        exit 1
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "Error: working tree is not clean."
+        echo "       Commit or discard local changes before publishing so ${TAG_NAME}"
+        echo "       points to the exact source used for the PyPI artifact."
+        exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/${TAG_NAME}" >/dev/null; then
+        echo "Error: local Git tag ${TAG_NAME} already exists."
+        exit 1
+    fi
+
+    GIT_HEAD_SHA="$(git rev-parse HEAD)"
+    LS_REMOTE_STATUS=0
+    git ls-remote --exit-code --tags origin "refs/tags/${TAG_NAME}" >/tmp/.publish_tag_check 2>/tmp/.publish_tag_check.err || LS_REMOTE_STATUS=$?
+    if [ "$LS_REMOTE_STATUS" -eq 0 ]; then
+        echo "Error: remote Git tag ${TAG_NAME} already exists on origin."
+        rm -f /tmp/.publish_tag_check /tmp/.publish_tag_check.err
+        exit 1
+    elif [ "$LS_REMOTE_STATUS" -ne 2 ]; then
+        echo "Error: failed to check whether remote Git tag ${TAG_NAME} exists."
+        cat /tmp/.publish_tag_check.err
+        rm -f /tmp/.publish_tag_check /tmp/.publish_tag_check.err
+        exit 1
+    fi
+    rm -f /tmp/.publish_tag_check /tmp/.publish_tag_check.err
+
+    echo "    ${TAG_NAME} will be created on commit ${GIT_HEAD_SHA} after PyPI upload succeeds."
+elif [ "$DRY_RUN" = true ]; then
+    echo "==> Dry run selected; skipping Git release tag creation."
+elif [ "$USE_TEST_PYPI" = true ]; then
+    echo "==> TestPyPI upload selected; skipping Git release tag creation."
+elif [ "$SKIP_GIT_TAG" = true ]; then
+    echo "==> --skip-git-tag selected; skipping Git release tag creation."
+fi
+
+# ---------------------------------------------------------------------------
 # Step 3: Build
 # ---------------------------------------------------------------------------
 echo "==> Building package..."
@@ -171,6 +231,12 @@ if [ "$USE_TEST_PYPI" = true ]; then
 else
     echo "==> Uploading to PyPI..."
     python3 -m twine upload dist/*
+    if [ "$CREATE_GIT_TAG" = true ]; then
+        echo ""
+        echo "==> Creating and pushing Git release tag ${TAG_NAME}..."
+        git tag -a "${TAG_NAME}" -m "Release ${PACKAGE_NAME} ${LOCAL_VERSION}"
+        git push origin "refs/tags/${TAG_NAME}"
+    fi
     echo ""
     echo "==> Done! Install with:"
     echo "    pip install alibabacloud.mcp-proxy"

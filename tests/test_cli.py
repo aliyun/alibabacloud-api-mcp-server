@@ -218,6 +218,13 @@ def test_parse_config_boundary_policy_accepts_string_lists() -> None:
     assert config.token.boundary_policy == policy
 
 
+def test_boundary_policy_help_uses_configured_max_length() -> None:
+    parser = build_parser()
+    help_text = parser.format_help()
+
+    assert f"max {BOUNDARY_POLICY_MAX_LENGTH} characters" in help_text
+
+
 def test_parse_config_debug_flag() -> None:
     config = parse_config(["--debug", "--log-file", "/tmp/test.log"])
 

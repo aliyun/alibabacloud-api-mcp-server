@@ -82,14 +82,14 @@ uvx alibabacloud.mcp-proxy@latest --debug --log-file=/tmp/a.log --safety-policy 
 
 ### Safety Policy
 
-You can constrain which MCP tools the proxy is allowed to invoke by specifying a **safety policy**. This is applied to the bearer token before connecting to the upstream MCP server, but it only applies to CLI-style calls. To constrain script execution or IaC-related calls, prefer `--boundary-policy` so the restriction is enforced at the RAM permission layer.
+You can constrain upstream MCP tool-call policy by specifying a **safety policy**. This is applied to the bearer token before connecting to the upstream MCP server and is best suited for CLI-style tool calls. To constrain which cloud resources can be affected by script execution or IaC-related calls, prefer `--boundary-policy` so the restriction is enforced at the RAM permission layer.
 
 Quick selection guide:
 
 | Flag | Use when you need to |
 |---|---|
-| `--boundary-policy` | Narrow cloud-resource permissions on the generated access token with RAM Policy JSON; recommended for script or IaC calls. |
-| `--safety-policy` | Restrict CLI-style MCP tool invocation policy with `service:action=allow/deny` expressions. |
+| `--boundary-policy` | Narrow cloud-resource permissions on the generated access token with RAM Policy JSON; recommended for cloud-resource constraints on script or IaC calls. |
+| `--safety-policy` | Restrict upstream MCP tool-call policy with `service:action=allow/deny` expressions; best suited for CLI-style tool calls. |
 | `--allow-tools` | Expose only specific MCP tool names. |
 
 #### Example: Allow only ECS describe operations
@@ -342,8 +342,8 @@ Every CLI flag has a corresponding environment variable. **CLI flags take preced
 
 | CLI Flag | Environment Variable | Default | Description |
 |---|---|---|---|
-| `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | — | Safety policy expression to constrain CLI-style MCP tool calls (e.g. `ecs:describe-*=allow,*=deny`). Applied to the bearer token before connecting. |
-| `--boundary-policy` | `ALIBABACLOUD_MCP_BOUNDARY_POLICY` | — | Extra RAM policy document (max 512 characters) that narrows the generated access token's permissions in place; recommended for script or IaC calls. Passed as the `Policy` parameter of IMS `GenerateAccessToken`. |
+| `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | — | Safety policy expression to constrain upstream MCP tool calls (e.g. `ecs:describe-*=allow,*=deny`); best suited for CLI-style tool calls. Applied to the bearer token before connecting. |
+| `--boundary-policy` | `ALIBABACLOUD_MCP_BOUNDARY_POLICY` | — | Extra RAM policy document (max 512 characters) that narrows the generated access token's permissions in place; recommended for cloud-resource constraints on script or IaC calls. Passed as the `Policy` parameter of IMS `GenerateAccessToken`. |
 
 #### Retry Settings
 

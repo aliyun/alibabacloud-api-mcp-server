@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from os import environ
-from typing import Mapping
+from typing import Any, Mapping
 
 from alibabacloud.mcp_proxy.auth.ims_access_token import (
     DEFAULT_IMS_CLIENT_ID,
@@ -85,6 +86,84 @@ def _parse_csv(raw: str | None) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _ensure_string_or_string_list(
+    statement: Mapping[str, Any],
+    field_name: str,
+    *,
+    statement_index: int,
+) -> None:
+    value = statement.get(field_name)
+    if isinstance(value, str) and value.strip():
+        return
+    if (
+        isinstance(value, list)
+        and value
+        and all(isinstance(item, str) and item.strip() for item in value)
+    ):
+        return
+    raise ProxyConfigurationError(
+        "boundary policy statement "
+        f"{statement_index} field '{field_name}' must be a non-empty string or "
+        "a non-empty list of strings."
+    )
+
+
+def _parse_boundary_policy(raw: str | None) -> str | None:
+    boundary_policy = (raw or "").strip() or None
+    if boundary_policy is None:
+        return None
+    if len(boundary_policy) > BOUNDARY_POLICY_MAX_LENGTH:
+        raise ProxyConfigurationError(
+            f"boundary policy must be at most {BOUNDARY_POLICY_MAX_LENGTH} characters "
+            f"(got {len(boundary_policy)})."
+        )
+
+    try:
+        policy = json.loads(boundary_policy)
+    except json.JSONDecodeError as exc:
+        raise ProxyConfigurationError(
+            "boundary policy must be valid JSON, for example "
+            '\'{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey",'
+            '"Resource":"*"}]}\'.'
+        ) from exc
+
+    if not isinstance(policy, dict):
+        raise ProxyConfigurationError("boundary policy must be a JSON object.")
+
+    version = policy.get("Version")
+    if version is not None and version != "1":
+        raise ProxyConfigurationError("boundary policy Version must be '1' when provided.")
+
+    statements = policy.get("Statement")
+    if not isinstance(statements, list) or not statements:
+        raise ProxyConfigurationError("boundary policy Statement must be a non-empty list.")
+
+    for index, statement in enumerate(statements, start=1):
+        if not isinstance(statement, dict):
+            raise ProxyConfigurationError(f"boundary policy statement {index} must be an object.")
+        if statement.get("Effect") != "Deny":
+            raise ProxyConfigurationError(
+                "boundary policy currently supports only statements with Effect 'Deny'."
+            )
+
+        has_action = "Action" in statement
+        has_not_action = "NotAction" in statement
+        if has_action == has_not_action:
+            raise ProxyConfigurationError(
+                "boundary policy statement "
+                f"{index} must include exactly one of 'Action' or 'NotAction'."
+            )
+
+        _ensure_string_or_string_list(
+            statement,
+            "Action" if has_action else "NotAction",
+            statement_index=index,
+        )
+        _ensure_string_or_string_list(statement, "Resource", statement_index=index)
+
+    return boundary_policy
+
+
 @dataclass(slots=True, frozen=True)
 class RetrySettings:
     max_attempts: int = 3
@@ -151,12 +230,7 @@ class AlibabaCloudProxyConfig:
         debug = (merged.get("debug") or "").strip().lower() in ("true", "1", "yes")
         log_file = (merged.get("log_file") or "").strip() or None
 
-        boundary_policy = (merged.get("boundary_policy") or "").strip() or None
-        if boundary_policy is not None and len(boundary_policy) > BOUNDARY_POLICY_MAX_LENGTH:
-            raise ProxyConfigurationError(
-                f"boundary policy must be at most {BOUNDARY_POLICY_MAX_LENGTH} characters "
-                f"(got {len(boundary_policy)})."
-            )
+        boundary_policy = _parse_boundary_policy(merged.get("boundary_policy"))
 
         return cls(
             site_type=site_type,

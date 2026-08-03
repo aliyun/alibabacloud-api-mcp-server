@@ -113,6 +113,11 @@ _SAMPLE_BOUNDARY_POLICY = (
     '{"Version":"1","Statement":[{"Effect":"Deny",'
     '"NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
 )
+_BOUNDARY_POLICY_PREFIX = (
+    '{"Version":"1","Statement":[{"Effect":"Deny",'
+    '"Action":"ecs:DescribeInstances","Resource":"'
+)
+_BOUNDARY_POLICY_SUFFIX = '"}]}'
 
 
 def test_parse_config_boundary_policy_defaults_to_none(monkeypatch) -> None:
@@ -146,10 +151,71 @@ def test_parse_config_boundary_policy_rejects_over_max_length(monkeypatch) -> No
 
 def test_parse_config_boundary_policy_accepts_max_length(monkeypatch) -> None:
     monkeypatch.delenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", raising=False)
+    resource = "*" * (
+        BOUNDARY_POLICY_MAX_LENGTH
+        - len(_BOUNDARY_POLICY_PREFIX)
+        - len(_BOUNDARY_POLICY_SUFFIX)
+    )
+    policy = f"{_BOUNDARY_POLICY_PREFIX}{resource}{_BOUNDARY_POLICY_SUFFIX}"
 
-    config = parse_config(["--boundary-policy", "x" * BOUNDARY_POLICY_MAX_LENGTH])
+    config = parse_config(["--boundary-policy", policy])
 
-    assert config.token.boundary_policy == "x" * BOUNDARY_POLICY_MAX_LENGTH
+    assert len(policy) == BOUNDARY_POLICY_MAX_LENGTH
+    assert config.token.boundary_policy == policy
+
+
+@pytest.mark.parametrize(
+    ("policy", "message"),
+    [
+        ("not-json", "valid JSON"),
+        ('["not", "an", "object"]', "JSON object"),
+        ('{"Version":"2","Statement":[]}', "Version must be '1'"),
+        ('{"Version":"1","Statement":[]}', "Statement must be a non-empty list"),
+        ('{"Version":"1","Statement":["bad"]}', "statement 1 must be an object"),
+        (
+            '{"Version":"1","Statement":[{"Effect":"Allow","Action":"ecs:*","Resource":"*"}]}',
+            "Effect 'Deny'",
+        ),
+        (
+            '{"Version":"1","Statement":[{"Effect":"Deny","Resource":"*"}]}',
+            "exactly one of 'Action' or 'NotAction'",
+        ),
+        (
+            '{"Version":"1","Statement":[{"Effect":"Deny","Action":"ecs:*",'
+            '"NotAction":"ram:*","Resource":"*"}]}',
+            "exactly one of 'Action' or 'NotAction'",
+        ),
+        (
+            '{"Version":"1","Statement":[{"Effect":"Deny","Action":[],"Resource":"*"}]}',
+            "field 'Action'",
+        ),
+        (
+            '{"Version":"1","Statement":[{"Effect":"Deny","Action":"ecs:*","Resource":[]}]}',
+            "field 'Resource'",
+        ),
+    ],
+)
+def test_parse_config_boundary_policy_rejects_invalid_shape(
+    monkeypatch,
+    policy: str,
+    message: str,
+) -> None:
+    monkeypatch.delenv("ALIBABACLOUD_MCP_BOUNDARY_POLICY", raising=False)
+
+    with pytest.raises(ProxyConfigurationError, match=message):
+        parse_config(["--boundary-policy", policy])
+
+
+def test_parse_config_boundary_policy_accepts_string_lists() -> None:
+    policy = (
+        '{"Version":"1","Statement":[{"Effect":"Deny",'
+        '"Action":["ecs:DeleteInstance","ecs:RunCommand"],'
+        '"Resource":["*"]}]}'
+    )
+
+    config = parse_config(["--boundary-policy", policy])
+
+    assert config.token.boundary_policy == policy
 
 
 def test_parse_config_debug_flag() -> None:

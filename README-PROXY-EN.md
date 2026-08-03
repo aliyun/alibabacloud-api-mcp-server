@@ -82,7 +82,15 @@ uvx alibabacloud.mcp-proxy@latest --debug --log-file=/tmp/a.log --safety-policy 
 
 ### Safety Policy
 
-You can constrain which MCP tools the proxy is allowed to invoke by specifying a **safety policy**. This is applied to the bearer token before connecting to the upstream MCP server, ensuring the token is scoped to only the allowed tool calls.
+You can constrain upstream MCP tool-call policy by specifying a **safety policy**. This is applied to the bearer token before connecting to the upstream MCP server and is best suited for CLI-style tool calls. To constrain which cloud resources can be affected by script execution or IaC-related calls, prefer `--boundary-policy` so the restriction is enforced at the RAM permission layer.
+
+Quick selection guide:
+
+| Flag | Use when you need to |
+|---|---|
+| `--boundary-policy` | Narrow cloud-resource permissions on the generated access token with RAM Policy JSON; recommended for cloud-resource constraints on script or IaC calls. |
+| `--safety-policy` | Restrict upstream MCP tool-call policy with `service:action=allow/deny` expressions; best suited for CLI-style tool calls. |
+| `--allow-tools` | Expose only specific MCP tool names. |
 
 #### Example: Allow only ECS describe operations
 
@@ -110,6 +118,60 @@ You can also set the safety policy via environment variable:
 
 ```bash
 export ALIBABACLOUD_MCP_SAFETY_POLICY="ecs:describe-*=allow,*=deny"
+uvx alibabacloud.mcp-proxy@latest
+```
+
+### Boundary Policy (In-place Permission Scope-down)
+
+Use `--boundary-policy` to supply an extra RAM policy document that **narrows the permissions of the generated access token in place** — tightening the token on top of the AK's own RAM permissions.
+
+When you need to constrain which cloud resources can be affected by script execution, IaC orchestration, or other non-CLI-style calls, prefer `--boundary-policy`.
+
+The policy document is at most **512 characters** and follows Alibaba Cloud RAM Policy syntax, supporting the standard `Effect`, `Action`, `NotAction`, and `Resource` fields. Currently only the `"Effect": "Deny"` form is supported.
+
+For example, to deny every action except `ram:UpdateAccessKey`:
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Deny",
+      "NotAction": "ram:UpdateAccessKey",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Command line example:
+
+```bash
+uvx alibabacloud.mcp-proxy@latest \
+  --boundary-policy '{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+```
+
+MCP client configuration example:
+
+```json
+{
+  "mcpServers": {
+    "alibabacloud": {
+      "command": "uvx",
+      "args": [
+        "alibabacloud.mcp-proxy@latest",
+        "--boundary-policy",
+        "{\"Version\":\"1\",\"Statement\":[{\"Effect\":\"Deny\",\"NotAction\":\"ram:UpdateAccessKey\",\"Resource\":\"*\"}]}"
+      ]
+    }
+  }
+}
+```
+
+You can also set it via environment variable:
+
+```bash
+export ALIBABACLOUD_MCP_BOUNDARY_POLICY='{"Version":"1","Statement":[{"Effect":"Deny","NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
 uvx alibabacloud.mcp-proxy@latest
 ```
 
@@ -280,7 +342,8 @@ Every CLI flag has a corresponding environment variable. **CLI flags take preced
 
 | CLI Flag | Environment Variable | Default | Description |
 |---|---|---|---|
-| `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | — | Safety policy expression to constrain allowed MCP tool calls (e.g. `ecs:describe-*=allow,*=deny`). Applied to the bearer token before connecting. |
+| `--safety-policy` | `ALIBABACLOUD_MCP_SAFETY_POLICY` | — | Safety policy expression to constrain upstream MCP tool calls (e.g. `ecs:describe-*=allow,*=deny`); best suited for CLI-style tool calls. Applied to the bearer token before connecting. |
+| `--boundary-policy` | `ALIBABACLOUD_MCP_BOUNDARY_POLICY` | — | Extra RAM policy document (max 512 characters) that narrows the generated access token's permissions in place; recommended for cloud-resource constraints on script or IaC calls. Passed as the `Policy` parameter of IMS `GenerateAccessToken`. |
 
 #### Retry Settings
 

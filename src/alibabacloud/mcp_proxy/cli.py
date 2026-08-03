@@ -14,7 +14,12 @@ from alibabacloud.mcp_proxy.auth.token_provider import (
     TokenAcquisitionError,
     build_token_provider,
 )
-from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig, ProxyConfigurationError, SiteType
+from alibabacloud.mcp_proxy.config import (
+    BOUNDARY_POLICY_MAX_LENGTH,
+    AlibabaCloudProxyConfig,
+    ProxyConfigurationError,
+    SiteType,
+)
 from alibabacloud.mcp_proxy.discovery import discover_mcp_server_url
 from alibabacloud.mcp_proxy.precheck import run_precheck
 from alibabacloud.mcp_proxy.proxy.server import AlibabaCloudMcpProxyServer
@@ -166,8 +171,19 @@ def _add_proxy_arguments(parser: argparse.ArgumentParser) -> None:
         "--safety-policy",
         dest="safety_policy",
         help="Safety policy expression to constrain allowed MCP tool calls "
-        "(e.g. 'ecs:describe-*=allow,*=deny'). "
+        "(e.g. 'ecs:describe-*=allow,*=deny'). For script or IaC calls, "
+        "prefer --boundary-policy to constrain RAM permissions. "
         "Also settable via ALIBABACLOUD_MCP_SAFETY_POLICY.",
+    )
+    parser.add_argument(
+        "--boundary-policy",
+        dest="boundary_policy",
+        help=f"Extra RAM policy document (max {BOUNDARY_POLICY_MAX_LENGTH} characters) "
+        "used to narrow the permissions of the generated access token in place. "
+        "Follows Alibaba Cloud "
+        "RAM Policy syntax (Effect / Action / NotAction / Resource). When set, it is "
+        "passed as the Policy parameter of IMS GenerateAccessToken. "
+        "Also settable via ALIBABACLOUD_MCP_BOUNDARY_POLICY.",
     )
     parser.add_argument(
         "--retry-max-attempts",
@@ -323,6 +339,7 @@ def parse_config(
         "bearer_token": args.bearer_token,
         "token_command": args.token_command,
         "safety_policy": args.safety_policy,
+        "boundary_policy": args.boundary_policy,
         "ims_client_id": args.ims_client_id,
         "ims_scope": args.ims_scope,
         "ims_endpoint": args.ims_endpoint,

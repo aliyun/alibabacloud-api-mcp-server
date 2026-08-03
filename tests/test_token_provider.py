@@ -89,3 +89,29 @@ async def test_build_token_provider_uses_ims_when_no_explicit_token(mock_ims: As
     )
     assert await provider.get_token() == "ims-token"
     mock_ims.assert_awaited()
+    assert mock_ims.await_args.kwargs["policy"] is None
+
+
+@pytest.mark.asyncio
+@patch(
+    "alibabacloud.mcp_proxy.auth.ims_access_token.generate_access_token_async",
+    new_callable=AsyncMock,
+)
+async def test_build_token_provider_forwards_boundary_policy(mock_ims: AsyncMock) -> None:
+    policy = (
+        '{"Version":"1","Statement":[{"Effect":"Deny",'
+        '"NotAction":"ram:UpdateAccessKey","Resource":"*"}]}'
+    )
+    mock_ims.return_value = BearerToken(value="ims-token")
+    provider = build_token_provider(
+        TokenSettings(
+            bearer_token=None,
+            token_command=None,
+            ims_client_id=DEFAULT_IMS_CLIENT_ID,
+            ims_scope=DEFAULT_IMS_SCOPE,
+            ims_endpoint=DEFAULT_IMS_ENDPOINT,
+            boundary_policy=policy,
+        )
+    )
+    assert await provider.get_token() == "ims-token"
+    assert mock_ims.await_args.kwargs["policy"] == policy

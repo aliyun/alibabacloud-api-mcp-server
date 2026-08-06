@@ -1,6 +1,6 @@
 [project]
 name = "alibabacloud.mcp-proxy"
-version = "0.2.15"
+version = "0.2.16"
 description = "Local stdio MCP proxy for Alibaba Cloud OpenAPI MCP servers."
 readme = "README.md"
 license = "Apache-2.0"

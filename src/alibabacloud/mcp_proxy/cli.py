@@ -9,6 +9,7 @@ from typing import Any
 
 import anyio
 
+from alibabacloud.mcp_proxy.auth.credential_tracker import CredentialTracker
 from alibabacloud.mcp_proxy.auth.ims_access_token import DEFAULT_IMS_CLIENT_ID
 from alibabacloud.mcp_proxy.auth.token_provider import (
     TokenAcquisitionError,
@@ -19,6 +20,7 @@ from alibabacloud.mcp_proxy.config import (
     AlibabaCloudProxyConfig,
     ProxyConfigurationError,
     SiteType,
+    TokenSettings,
 )
 from alibabacloud.mcp_proxy.discovery import discover_mcp_server_url
 from alibabacloud.mcp_proxy.precheck import run_precheck
@@ -358,32 +360,83 @@ def _is_sse_endpoint(server_url: str) -> bool:
     """Return True if the server URL indicates an SSE transport (ends with /sse)."""
     return server_url.rstrip("/").endswith("/sse")
 
-async def _resolve_server_url(config: AlibabaCloudProxyConfig) -> str:
+
+def _uses_default_credentials_for_token(token: TokenSettings) -> bool:
+    """Return True when the *upstream token* derives from the default credential chain.
+
+    Only in this mode does a local Alibaba Cloud CLI profile switch have any
+    bearing on the upstream token. Explicit ``--bearer-token`` / ``--token-command``
+    users must not resolve default credentials, disconnect on profile edits, or
+    re-run their token command because an unrelated profile changed.
+
+    Note this is specifically about token derivation, not startup discovery: an
+    explicit-token user without ``--server-url`` still uses the default chain once
+    to discover the endpoint at startup, but their token never tracks the profile.
+    """
+    return not token.bearer_token and not token.token_command
+
+async def _resolve_server_url(
+    config: AlibabaCloudProxyConfig,
+    credential_tracker: CredentialTracker | None = None,
+) -> str:
     """Return the MCP server URL, discovering it via OpenAPI if not explicitly set."""
     if config.server_url:
         _LOGGER.info("Using user-specified server URL: %s", config.server_url)
         return config.server_url
 
-    return await discover_mcp_server_url(config.site_type)
+    credential_client = (
+        credential_tracker.get_client() if credential_tracker is not None else None
+    )
+    return await discover_mcp_server_url(
+        config.site_type, credential_client=credential_client
+    )
 
 
 async def run_proxy(config: AlibabaCloudProxyConfig) -> None:
-    server_url = await _resolve_server_url(config)
-    token_provider = build_token_provider(config.token)
-
-    if _is_sse_endpoint(server_url):
-        connection_factory = SseConnectionFactory(config, server_url)
-    else:
-        connection_factory = StreamableHttpConnectionFactory(config, server_url)
+    # Track local default-credential switches only when the token actually
+    # derives from the default chain. Explicit-token modes keep the original,
+    # profile-independent behavior (see _uses_default_credentials_for_token).
+    credential_tracker = (
+        CredentialTracker()
+        if _uses_default_credentials_for_token(config.token)
+        else None
+    )
+    server_url = await _resolve_server_url(config, credential_tracker)
+    token_provider = build_token_provider(config.token, credential_tracker)
 
     async with anyio.create_task_group() as background_tasks:
-        connection_factory.set_task_group(background_tasks)
+
+        def _build_connection_factory(url: str):
+            if _is_sse_endpoint(url):
+                factory = SseConnectionFactory(config, url)
+            else:
+                factory = StreamableHttpConnectionFactory(config, url)
+            factory.set_task_group(background_tasks)
+            return factory
+
+        connection_factory = _build_connection_factory(server_url)
+
+        # When the URL was auto-discovered and credentials can change, re-run
+        # discovery after a switch: the discovered URL is account/Core-scoped, so
+        # the endpoint must follow the identity. An explicit --server-url is
+        # always honored and never re-discovered.
+        factory_resolver = None
+        if credential_tracker is not None and not config.server_url:
+
+            async def factory_resolver(credential_client: Any):
+                url = await discover_mcp_server_url(
+                    config.site_type, credential_client=credential_client
+                )
+                return _build_connection_factory(url)
+
         session = ReconnectingSession(
             connection_factory,
             token_provider,
             config.retry,
             safety_policy=config.token.safety_policy,
             allowed_tools=config.token.allowed_tools,
+            credential_tracker=credential_tracker,
+            factory_resolver=factory_resolver,
         )
         proxy = AlibabaCloudMcpProxyServer(config, session)
         try:

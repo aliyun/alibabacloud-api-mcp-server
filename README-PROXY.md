@@ -72,6 +72,28 @@ export ALIBABA_CLOUD_ACCESS_KEY_SECRET=your_access_key_secret
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+### 自动检测本地 profile 文件切换
+
+当代理使用默认凭证链（未显式指定 `--bearer-token` 或 `--token-command`）时，会自动检测**本地 profile 文件**的变化并切换身份，无需重启代理进程。典型场景是执行 `aliyun configure ...` 切换默认 profile。
+
+监控的文件与默认凭证链中基于文件的 Provider 一致（Home 目录按凭证 SDK 的解析逻辑确定，Windows 下与 `expanduser("~")` 可能不同）：
+
+- `~/.aliyun/config.json`：阿里云 CLI profile（优先级较高）；
+- `$ALIBABA_CLOUD_CREDENTIALS_FILE`，未设置时为 `~/.alibabacloud/credentials.ini`：共享 profile（优先级较低）。
+
+两个文件都会被监控，最终仍由 SDK 的凭证链决定哪个文件实际生效，因此高优先级文件的出现、消失或切换都能被检测到。
+
+- 代理按文件签名（`mtime_ns`、大小、inode）在下一次请求时按需重新解析凭证；只有当解析出的 AccessKey ID 发生变化时才判定为身份切换。
+- 身份切换后，代理会作废缓存的 Bearer Token，并在未显式指定 `--server-url` 时通过 `ListApiMcpServerCores` 为新身份重新发现上游 MCP Server 端点（发现到的 URL 是按账号/Core 维度隔离的），随后重建到上游的连接。
+- 端点重新发现失败时，该次请求会直接失败，而不会用旧身份的端点连接——避免把新账号的 Token 发往旧账号的端点；后续请求会重试发现。
+
+检测范围与限制：
+
+- 仅监控上述两个 profile 文件。以下默认凭证链来源的变化**不会**被主动检测，需按各自的刷新机制生效或重启代理进程：环境变量凭证、OIDC Token 文件、ECS、凭证 URI 等其他 Provider。
+- 设置 `ALIBABA_CLOUD_CLI_PROFILE_DISABLED=true` 只会禁用 CLI profile（`config.json`）的检测，共享 profile 文件仍会被监控。
+- 显式指定 `--bearer-token` 或 `--token-command` 时，Token 不再跟随本地 profile，因此不会自动切换。
+- 显式指定 `--server-url` 时，端点固定不变，仅 Token 会随身份切换刷新。
+
 ## 安全策略
 
 可以通过 `--safety-policy` 限制上游 MCP 工具调用策略。安全策略会在连接上游 MCP Server 前应用到访问令牌上，适合约束 CLI 类工具调用；如果需要约束脚本执行或 IaC 相关调用能操作哪些云资源，推荐使用 `--boundary-policy` 在 RAM 权限层面做限制。

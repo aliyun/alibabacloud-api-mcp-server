@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 import anyio
 
@@ -85,23 +85,46 @@ class CommandBearerTokenSource:
 
 
 class CachedBearerTokenProvider:
-    def __init__(self, source: BearerTokenSource, *, refresh_skew_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        source: BearerTokenSource,
+        *,
+        refresh_skew_seconds: int = 60,
+        generation_provider: Callable[[], int] | None = None,
+    ) -> None:
         self._source = source
         self._refresh_skew_seconds = refresh_skew_seconds
+        self._generation_provider = generation_provider
         self._cached_token: BearerToken | None = None
+        self._token_generation = 0
         self._lock = anyio.Lock()
 
     async def get_token(self, *, force_refresh: bool = False) -> str:
         async with self._lock:
-            if not force_refresh and self._cached_token is not None:
-                if not self._cached_token.is_expiring_within(self._refresh_skew_seconds):
-                    return self._cached_token.value
+            current_gen = (
+                self._generation_provider()
+                if self._generation_provider is not None
+                else self._token_generation
+            )
+            identity_changed = current_gen != self._token_generation
+
+            if (
+                not force_refresh
+                and not identity_changed
+                and self._cached_token is not None
+                and not self._cached_token.is_expiring_within(self._refresh_skew_seconds)
+            ):
+                return self._cached_token.value
 
             self._cached_token = await self._source.fetch_token()
+            self._token_generation = current_gen
             return self._cached_token.value
 
 
-def build_token_provider(settings: TokenSettings) -> CachedBearerTokenProvider:
+def build_token_provider(
+    settings: TokenSettings,
+    credential_tracker: Any = None,
+) -> CachedBearerTokenProvider:
     if settings.bearer_token:
         source: BearerTokenSource = StaticBearerTokenSource(settings.bearer_token)
     elif settings.token_command:
@@ -112,9 +135,17 @@ def build_token_provider(settings: TokenSettings) -> CachedBearerTokenProvider:
             scope=settings.ims_scope,
             endpoint=settings.ims_endpoint,
             policy=settings.boundary_policy,
+            credential_tracker=credential_tracker,
         )
 
-    return CachedBearerTokenProvider(source, refresh_skew_seconds=settings.refresh_skew_seconds)
+    generation_provider = (
+        credential_tracker.current_generation if credential_tracker is not None else None
+    )
+    return CachedBearerTokenProvider(
+        source,
+        refresh_skew_seconds=settings.refresh_skew_seconds,
+        generation_provider=generation_provider,
+    )
 
 
 def _parse_expiry(payload: dict[str, object]) -> datetime | None:

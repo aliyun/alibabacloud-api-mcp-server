@@ -276,3 +276,133 @@ def test_telemetry_view_subcommand_no_open() -> None:
     parser = build_parser()
     args = parser.parse_args(["telemetry-view", "--no-open"])
     assert args.tv_no_open is True
+
+
+@pytest.mark.asyncio
+async def test_run_proxy_wires_shared_credential_tracker(monkeypatch) -> None:
+    import alibabacloud.mcp_proxy.cli as cli_mod
+    from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+
+    captured: dict[str, object] = {}
+
+    class DummyTracker:
+        def get_client(self):
+            return "dummy-client"
+
+    def fake_tracker_ctor():
+        tracker = DummyTracker()
+        captured["tracker"] = tracker
+        return tracker
+
+    async def fake_discover(site_type, *, credential_client=None):
+        captured["discovery_client"] = credential_client
+        return "https://example.com/mcp"
+
+    def fake_build_token_provider(settings, credential_tracker=None):
+        captured["tp_tracker"] = credential_tracker
+        return object()
+
+    class FakeFactory:
+        def __init__(self, *a, **k):
+            pass
+
+        def set_task_group(self, tg):
+            pass
+
+    class FakeSession:
+        def __init__(self, *a, credential_tracker=None, **k):
+            captured["session_tracker"] = credential_tracker
+
+        async def aclose(self):
+            pass
+
+    class FakeProxy:
+        def __init__(self, config, session):
+            pass
+
+        async def run(self):
+            return None
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(cli_mod, "CredentialTracker", fake_tracker_ctor)
+    monkeypatch.setattr(cli_mod, "discover_mcp_server_url", fake_discover)
+    monkeypatch.setattr(cli_mod, "build_token_provider", fake_build_token_provider)
+    monkeypatch.setattr(cli_mod, "StreamableHttpConnectionFactory", FakeFactory)
+    monkeypatch.setattr(cli_mod, "SseConnectionFactory", FakeFactory)
+    monkeypatch.setattr(cli_mod, "AlibabaCloudMcpProxyServer", FakeProxy)
+    monkeypatch.setattr(cli_mod, "ReconnectingSession", FakeSession)
+
+    config = AlibabaCloudProxyConfig.from_mapping({"server_url": None})
+    await cli_mod.run_proxy(config)
+
+    tracker = captured["tracker"]
+    assert captured["discovery_client"] == "dummy-client"
+    assert captured["tp_tracker"] is tracker
+    assert captured["session_tracker"] is tracker
+
+
+@pytest.mark.asyncio
+async def test_run_proxy_skips_credential_tracker_for_explicit_token(monkeypatch) -> None:
+    import alibabacloud.mcp_proxy.cli as cli_mod
+    from alibabacloud.mcp_proxy.config import AlibabaCloudProxyConfig
+
+    captured: dict[str, object] = {}
+
+    def fake_tracker_ctor():
+        captured["tracker_created"] = True
+        raise AssertionError("CredentialTracker must not be created in explicit-token mode")
+
+    async def fake_discover(site_type, *, credential_client=None):
+        captured["discovery_called"] = True
+        return "https://example.com/mcp"
+
+    def fake_build_token_provider(settings, credential_tracker=None):
+        captured["tp_tracker"] = credential_tracker
+        return object()
+
+    class FakeFactory:
+        def __init__(self, *a, **k):
+            pass
+
+        def set_task_group(self, tg):
+            pass
+
+    class FakeSession:
+        def __init__(self, *a, credential_tracker=None, factory_resolver=None, **k):
+            captured["session_tracker"] = credential_tracker
+            captured["factory_resolver"] = factory_resolver
+
+        async def aclose(self):
+            pass
+
+    class FakeProxy:
+        def __init__(self, config, session):
+            pass
+
+        async def run(self):
+            return None
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr(cli_mod, "CredentialTracker", fake_tracker_ctor)
+    monkeypatch.setattr(cli_mod, "discover_mcp_server_url", fake_discover)
+    monkeypatch.setattr(cli_mod, "build_token_provider", fake_build_token_provider)
+    monkeypatch.setattr(cli_mod, "StreamableHttpConnectionFactory", FakeFactory)
+    monkeypatch.setattr(cli_mod, "SseConnectionFactory", FakeFactory)
+    monkeypatch.setattr(cli_mod, "AlibabaCloudMcpProxyServer", FakeProxy)
+    monkeypatch.setattr(cli_mod, "ReconnectingSession", FakeSession)
+
+    # Explicit bearer token + explicit URL: no default-credential involvement.
+    config = AlibabaCloudProxyConfig.from_mapping(
+        {"server_url": "https://example.com/mcp", "bearer_token": "static-token"}
+    )
+    await cli_mod.run_proxy(config)
+
+    assert "tracker_created" not in captured  # tracker never constructed
+    assert "discovery_called" not in captured  # explicit URL, no discovery
+    assert captured["tp_tracker"] is None
+    assert captured["session_tracker"] is None
+    assert captured["factory_resolver"] is None  # no re-discovery on profile edits

@@ -72,6 +72,28 @@ export ALIBABA_CLOUD_ACCESS_KEY_SECRET=your_access_key_secret
 uvx alibabacloud.mcp-proxy@latest
 ```
 
+### Automatic Local Profile-Switch Detection
+
+When the proxy uses the default credential chain (no explicit `--bearer-token` or `--token-command`), it automatically detects changes to the **local profile files** and switches identity at runtime, without restarting the proxy process. The typical case is switching the default profile via `aliyun configure ...`.
+
+The watched files mirror the file-backed providers of the default credential chain (the home directory is resolved with the credential SDK's own logic, which can differ from `expanduser("~")` on Windows):
+
+- `~/.aliyun/config.json` — the Alibaba Cloud CLI profile (higher priority);
+- `$ALIBABA_CLOUD_CREDENTIALS_FILE`, or `~/.alibabacloud/credentials.ini` when unset — the shared profile (lower priority).
+
+Both files are watched; the SDK's chain still decides which file supplies the effective credentials, so a higher-priority file appearing, disappearing, or switching is also detected.
+
+- The proxy re-resolves the credentials on the next request using a file signature (`mtime_ns`, size, inode); an identity switch is only recognized when the resolved AccessKey ID actually changes.
+- After a switch, the proxy invalidates the cached Bearer Token and — when `--server-url` was not set — re-discovers the upstream MCP Server endpoint for the new identity via `ListApiMcpServerCores` (the discovered URL is scoped per account/Core), then rebuilds the upstream connection.
+- If endpoint re-discovery fails, that request fails rather than connecting through the previous identity's endpoint — this prevents sending the new account's token to the old account's endpoint. Later requests retry discovery.
+
+Scope and limitations:
+
+- Only the two profile files above are watched. Changes from other default-credential-chain sources are **not** actively detected and rely on their own refresh behavior or a process restart: environment-variable credentials, OIDC token files, ECS, and the credentials URI provider.
+- Setting `ALIBABA_CLOUD_CLI_PROFILE_DISABLED=true` disables detection of the CLI profile (`config.json`) only; the shared profile file is still watched.
+- With an explicit `--bearer-token` or `--token-command`, the token no longer tracks the local profile, so it does not auto-switch.
+- With an explicit `--server-url`, the endpoint is fixed; only the token is refreshed on an identity switch.
+
 ### Debugging
 
 To enable debug logging, use `--debug` together with `--log-file` to write detailed logs to a file:

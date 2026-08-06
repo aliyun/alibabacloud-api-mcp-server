@@ -136,3 +136,33 @@ def test_extract_token_from_tea_openapi_response_shape() -> None:
     token, expires = extract_token_from_ims_api_response(resp)
     assert token == "eyJhbGciOiJ.unit-test"
     assert expires is not None
+
+
+@pytest.mark.asyncio
+async def test_ims_source_uses_tracker_client(monkeypatch) -> None:
+    from alibabacloud.mcp_proxy.auth import ims_access_token as mod
+    from alibabacloud.mcp_proxy.auth.ims_access_token import ImsBearerTokenSource
+
+    sentinel_client = object()
+
+    class FakeTracker:
+        def get_client(self):
+            return sentinel_client
+
+    captured = {}
+
+    async def fake_generate(*, client_id, scope, endpoint, policy, credential_client):
+        captured["client"] = credential_client
+        from alibabacloud.mcp_proxy.auth.token_provider import BearerToken
+
+        return BearerToken(value="tok")
+
+    monkeypatch.setattr(mod, "generate_access_token_async", fake_generate)
+
+    source = ImsBearerTokenSource(
+        client_id="cid", scope="scope", credential_tracker=FakeTracker()
+    )
+    token = await source.fetch_token()
+
+    assert token.value == "tok"
+    assert captured["client"] is sentinel_client

@@ -39,9 +39,6 @@ _REDACT_EXACT_KEYS = frozenset(
     }
 )
 
-_credential_singleton: CredentialClient | None = None
-
-
 def _redact_sensitive_for_log(obj: Any, depth: int = 0) -> Any:
     if depth > 24:
         return "<max depth>"
@@ -82,11 +79,13 @@ def _log_ims_generate_access_token_response(response: Any) -> None:
 
 
 def get_default_credential_client() -> CredentialClient:
-    """Return a process-wide CredentialClient using the default credential chain."""
-    global _credential_singleton
-    if _credential_singleton is None:
-        _credential_singleton = CredentialClient()
-    return _credential_singleton
+    """Return a CredentialClient using the default credential chain.
+
+    A fresh client is returned each call so callers always observe the current
+    default credentials (the library caches profile/provider selection per
+    client instance). Long-lived callers should hold a CredentialTracker.
+    """
+    return CredentialClient()
 
 
 def parse_ims_generate_access_token_body(body: Any) -> tuple[str, datetime | None]:
@@ -373,18 +372,25 @@ class ImsBearerTokenSource:
         endpoint: str = DEFAULT_IMS_ENDPOINT,
         policy: str | None = None,
         credential_client: CredentialClient | None = None,
+        credential_tracker: Any = None,
     ) -> None:
         self._client_id = client_id
         self._scope = scope
         self._endpoint = endpoint
         self._policy = policy
         self._credential_client = credential_client
+        self._credential_tracker = credential_tracker
 
     async def fetch_token(self):
+        client = (
+            self._credential_tracker.get_client()
+            if self._credential_tracker is not None
+            else self._credential_client
+        )
         return await generate_access_token_async(
             client_id=self._client_id,
             scope=self._scope,
             endpoint=self._endpoint,
             policy=self._policy,
-            credential_client=self._credential_client,
+            credential_client=client,
         )

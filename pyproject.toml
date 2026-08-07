@@ -1,6 +1,6 @@
 [project]
 name = "alibabacloud.mcp-proxy"
-version = "0.2.16"
+version = "0.2.17"
 description = "Local stdio MCP proxy for Alibaba Cloud OpenAPI MCP servers."
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,8 +21,9 @@ classifiers = [
 ]
 dependencies = [
     "aiohttp>=3.9.0",
-    # credentials-python Windows OAuth config.json overwrite fix (os.replace).
-    "alibabacloud-credentials>=1.0.10",
+    # credentials-python: Windows OAuth config.json overwrite fix (os.replace)
+    # and OAuth STS reuse-until-expiration (no premature re-exchange storm).
+    "alibabacloud-credentials>=1.0.11",
     "alibabacloud-openapi-util>=0.2.4",
     "alibabacloud-tea-openapi>=0.4.4",
     "alibabacloud-tea-util>=0.3.14",

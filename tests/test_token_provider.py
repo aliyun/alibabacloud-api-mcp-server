@@ -115,3 +115,34 @@ async def test_build_token_provider_forwards_boundary_policy(mock_ims: AsyncMock
     )
     assert await provider.get_token() == "ims-token"
     assert mock_ims.await_args.kwargs["policy"] == policy
+
+
+@pytest.mark.asyncio
+async def test_provider_refetches_when_generation_advances() -> None:
+    source = FakeTokenSource(
+        [
+            BearerToken(value="tok-a", expires_at=datetime.now(UTC) + timedelta(minutes=5)),
+            BearerToken(value="tok-b", expires_at=datetime.now(UTC) + timedelta(minutes=5)),
+        ]
+    )
+    gen = {"v": 1}
+    provider = CachedBearerTokenProvider(
+        source, refresh_skew_seconds=30, generation_provider=lambda: gen["v"]
+    )
+
+    assert await provider.get_token() == "tok-a"
+    assert await provider.get_token() == "tok-a"  # cached, gen unchanged
+    gen["v"] = 2
+    assert await provider.get_token() == "tok-b"  # gen advanced -> refetch
+    assert source.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_without_generation_provider_caches_as_before() -> None:
+    source = FakeTokenSource(
+        [BearerToken(value="only", expires_at=datetime.now(UTC) + timedelta(minutes=5))]
+    )
+    provider = CachedBearerTokenProvider(source, refresh_skew_seconds=30)
+    assert await provider.get_token() == "only"
+    assert await provider.get_token() == "only"
+    assert source.calls == 1

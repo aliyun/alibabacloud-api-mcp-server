@@ -2,42 +2,46 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import time
 
+import psutil
+
 _AGENT_BINARIES = ("claude", "codex", "QoderWork")
+# 匹配时忽略大小写与 Windows 的 .exe 后缀
+_AGENT_NAMES = frozenset(name.lower() for name in _AGENT_BINARIES)
 _MCP_SESSION_DIR = "~/.cache/alibabacloud-agent-toolkit/mcp-sessions"
 
 
+def _agent_process_name(name: str) -> str:
+    """Normalize a process name: strip the Windows .exe suffix and case."""
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name.lower()
+
+
 def find_agent_pid() -> int | None:
-    """Walk up the process tree to find the agent PID for hook correlation."""
+    """Walk up the process tree to find the agent PID for hook correlation.
+
+    Uses psutil so the walk is platform-agnostic and safe to call from the
+    asyncio event-loop thread: unlike shelling out to `ps` (which can hang
+    forever with the Git/MSYS `ps.exe` on Windows), psutil queries the OS
+    process table directly and never blocks indefinitely.
+    """
     pid = os.getpid()
     for _ in range(10):
         try:
-            ppid = int(
-                subprocess.check_output(
-                    ["ps", "-o", "ppid=", "-p", str(pid)],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).strip()
-            )
-        except Exception:
+            proc = psutil.Process(pid)
+            ppid = proc.ppid()
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             break
         if ppid <= 1:
             break
         try:
-            comm = (
-                subprocess.check_output(
-                    ["ps", "-o", "comm=", "-p", str(ppid)],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                )
-                .strip()
-                .rsplit("/", 1)[-1]
-            )
-        except Exception:
+            parent = psutil.Process(ppid)
+            name = _agent_process_name(parent.name())
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             break
-        if comm in _AGENT_BINARIES:
+        if name in _AGENT_NAMES:
             return ppid
         pid = ppid
     return None
